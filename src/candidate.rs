@@ -1,4 +1,4 @@
-// Experiment 03: Barycentric Event-Horizon Condensation + Phyllotaxis Nucleation + Metatron-13
+// Experiment 04: Soliton Standing-Wave Detector + Barycentric Horizon + Phyllotaxis + Metatron-13
 
 const GOLDEN_HASH_32: u32 = 0x9E37_79B9;
 const BARYCENTRIC_HORIZON_MAX: u64 = 1_048_576;
@@ -13,6 +13,86 @@ fn insertion_sort(slice: &mut [i32]) {
         }
         slice[j] = key;
     }
+}
+
+/// Detects laminar ascending/descending runs or a two-limb Soliton wave (crest + trough)
+/// and resolves it in a single linear merge pass.
+fn try_soliton_wave_collapse(slice: &mut [i32]) -> bool {
+    let len = slice.len();
+    if len < 32 {
+        return false;
+    }
+
+    // Quick constant-time structural check on 8 interior points before full scan
+    // If more than 1 direction reversal appears in 8 coarse points, it is not a single soliton.
+    let step = len / 8;
+    let mut dir_changes = 0_usize;
+    let mut prev_dir = 0_i8;
+    for i in 1..8 {
+        let a = slice[(i - 1) * step];
+        let b = slice[i * step];
+        let dir = if b > a {
+            1_i8
+        } else if b < a {
+            -1_i8
+        } else {
+            prev_dir
+        };
+        if prev_dir != 0 && dir != 0 && dir != prev_dir {
+            dir_changes += 1;
+        }
+        if dir != 0 {
+            prev_dir = dir;
+        }
+    }
+    if dir_changes > 1 {
+        return false;
+    }
+
+    let mut peak = 0_usize;
+    while peak + 1 < len && slice[peak] <= slice[peak + 1] {
+        peak += 1;
+    }
+    if peak == len - 1 {
+        return true;
+    }
+
+    // Verify if suffix [peak + 1 .. len] is non-increasing
+    let mut tail = peak + 1;
+    while tail + 1 < len && slice[tail] >= slice[tail + 1] {
+        tail += 1;
+    }
+    if tail != len - 1 {
+        return false;
+    }
+
+    if peak == 0 {
+        slice.reverse();
+        return true;
+    }
+
+    slice[peak + 1..].reverse();
+    let mut merged = Vec::with_capacity(len);
+    let (left, right) = slice.split_at(peak + 1);
+    let mut i = 0_usize;
+    let mut j = 0_usize;
+    while i < left.len() && j < right.len() {
+        if left[i] <= right[j] {
+            merged.push(left[i]);
+            i += 1;
+        } else {
+            merged.push(right[j]);
+            j += 1;
+        }
+    }
+    if i < left.len() {
+        merged.extend_from_slice(&left[i..]);
+    }
+    if j < right.len() {
+        merged.extend_from_slice(&right[j..]);
+    }
+    slice.copy_from_slice(&merged);
+    true
 }
 
 fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> bool {
@@ -90,8 +170,6 @@ fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> bool {
     true
 }
 
-/// Condenses integers into discrete energy orbits relative to the ground state `min_val`
-/// whenever the energy span fits within the Barycentric Event Horizon.
 fn try_barycentric_condensation(slice: &mut [i32]) -> bool {
     let len = slice.len();
     if len < 64 {
@@ -141,6 +219,9 @@ fn try_barycentric_condensation(slice: &mut [i32]) -> bool {
 
 pub fn candidate_sort(data: &mut [i32]) {
     if data.len() <= 1 {
+        return;
+    }
+    if try_soliton_wave_collapse(data) {
         return;
     }
     if try_phyllotaxis_nucleation(data) {
