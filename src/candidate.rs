@@ -1,4 +1,7 @@
-// Experiment 10: Branchless CMOV Soliton Merge + 4x Unrolled Constant-Shift Tetra-Shell Spectral
+// Experiment 13: Red-Team Immunized Sorter
+// - Valley (U-shape) + Partial-Soliton Prefix Peeling (solves Iceberg & Fake Soliton)
+// - 128-Nuclei Dual-Sentinel Lattice with Local Burst Guard & Probe Span Pre-Filter
+// - In-Place Small-Slice QuickSort Cutoff (N <= 512) + Tetra-Shell 8-8-8-8 L1 Spectral
 
 const BARYCENTRIC_HORIZON_MAX: u64 = 1_048_576;
 
@@ -21,9 +24,94 @@ fn insertion_sort(slice: &mut [i32]) {
     }
 }
 
+fn in_place_small_sort(slice: &mut [i32]) {
+    if slice.len() <= 24 {
+        insertion_sort(slice);
+        return;
+    }
+    let mid = slice.len() / 2;
+    let last = slice.len() - 1;
+    if slice[mid] < slice[0] {
+        slice.swap(0, mid);
+    }
+    if slice[last] < slice[0] {
+        slice.swap(0, last);
+    }
+    if slice[last] < slice[mid] {
+        slice.swap(mid, last);
+    }
+    let pivot = slice[mid];
+    let mut i = 0_usize;
+    let mut j = last;
+    loop {
+        while slice[i] < pivot {
+            i += 1;
+        }
+        while slice[j] > pivot {
+            j -= 1;
+        }
+        if i >= j {
+            break;
+        }
+        slice.swap(i, j);
+        i += 1;
+        j -= 1;
+    }
+    in_place_small_sort(&mut slice[..=j]);
+    in_place_small_sort(&mut slice[j + 1..]);
+}
+
+fn merge_sorted_halves(slice: &mut [i32], split: usize) {
+    if slice[split - 1] <= slice[split] {
+        return;
+    }
+    // Constant-prefix fast path: if non-decreasing `left` has `left[0] == left[split - 1]`,
+    // then all `split` elements of `left` equal `c`, so only elements `< c` in `right` move!
+    let c = slice[0];
+    if c == slice[split - 1] {
+        let p = slice[split..].partition_point(|&x| x < c);
+        slice.copy_within(split..split + p, 0);
+        slice[p..split + p].fill(c);
+        return;
+    }
+
+    // Trim prefix of `left` that is already <= `right[0]`
+    let r0 = slice[split];
+    let trim_left = slice[..split].partition_point(|&x| x <= r0);
+    let active = &mut slice[trim_left..];
+    let adj_split = split - trim_left;
+
+    let len = active.len();
+    let mut merged = vec![0_i32; len];
+    let (left, right) = active.split_at(adj_split);
+    let mut i = 0_usize;
+    let mut j = 0_usize;
+    let mut k = 0_usize;
+    while i < left.len() && j < right.len() {
+        let a = left[i];
+        let b = right[j];
+        if a <= b {
+            merged[k] = a;
+            i += 1;
+        } else {
+            merged[k] = b;
+            j += 1;
+        }
+        k += 1;
+    }
+    if i < left.len() {
+        let rem = left.len() - i;
+        merged[k..k + rem].copy_from_slice(&left[i..]);
+    } else if j < right.len() {
+        let rem = right.len() - j;
+        merged[k..k + rem].copy_from_slice(&right[j..]);
+    }
+    active.copy_from_slice(&merged);
+}
+
 fn try_soliton_wave_collapse(slice: &mut [i32]) -> bool {
     let len = slice.len();
-    if len < 32 {
+    if len <= 512 {
         return false;
     }
 
@@ -59,48 +147,81 @@ fn try_soliton_wave_collapse(slice: &mut [i32]) -> bool {
         return true;
     }
 
+    // Case A: Valley Soliton (descending prefix -> ascending suffix, U-shape)
+    if peak == 0 {
+        let mut valley = 0_usize;
+        while valley + 1 < len && slice[valley] >= slice[valley + 1] {
+            valley += 1;
+        }
+        if valley == len - 1 {
+            slice.reverse();
+            return true;
+        }
+        let mut tail = valley + 1;
+        while tail + 1 < len && slice[tail] <= slice[tail + 1] {
+            tail += 1;
+        }
+        if tail == len - 1 {
+            slice[..=valley].reverse();
+            merge_sorted_halves(slice, valley + 1);
+            return true;
+        }
+        return false;
+    }
+
+    // Case B: Crest-Trough Soliton (ascending prefix -> descending suffix)
     let mut tail = peak + 1;
     while tail + 1 < len && slice[tail] >= slice[tail + 1] {
         tail += 1;
     }
-    if tail != len - 1 {
-        return false;
-    }
-
-    if peak == 0 {
-        slice.reverse();
+    if tail == len - 1 {
+        let mut merged = vec![0_i32; len];
+        let (left, right) = slice.split_at(peak + 1);
+        let mut i = 0_usize;
+        let mut j = right.len();
+        let mut k = 0_usize;
+        while i < left.len() && j > 0 {
+            let a = left[i];
+            let b = right[j - 1];
+            if a <= b {
+                merged[k] = a;
+                i += 1;
+            } else {
+                merged[k] = b;
+                j -= 1;
+            }
+            k += 1;
+        }
+        if i < left.len() {
+            let rem = left.len() - i;
+            merged[k..k + rem].copy_from_slice(&left[i..]);
+        } else {
+            while j > 0 {
+                merged[k] = right[j - 1];
+                j -= 1;
+                k += 1;
+            }
+        }
+        slice.copy_from_slice(&merged);
         return true;
     }
 
-    let mut merged = vec![0_i32; len];
-    let (left, right) = slice.split_at(peak + 1);
-    let mut i = 0_usize;
-    let mut j = right.len();
-    let mut k = 0_usize;
-    while i < left.len() && j > 0 {
-        let a = left[i];
-        let b = right[j - 1];
-        if a <= b {
-            merged[k] = a;
-            i += 1;
-        } else {
-            merged[k] = b;
-            j -= 1;
+    // Case C: Partial-Soliton Prefix Peeling (Iceberg & Fake Soliton immunity)
+    // If >= 75% of the array is already non-decreasing, sort only the remaining tail and merge!
+    if peak >= (len * 3) / 4 {
+        // If the prefix started with a long constant plateau, snap `peak` back to the plateau end
+        let c = slice[0];
+        if slice[peak / 2] == c {
+            while peak > 0 && slice[peak] != c {
+                peak -= 1;
+            }
         }
-        k += 1;
+        candidate_sort(&mut slice[peak + 1..]);
+        merge_sorted_halves(slice, peak + 1);
+        return true;
     }
-    if i < left.len() {
-        let rem = left.len() - i;
-        merged[k..k + rem].copy_from_slice(&left[i..]);
-    } else {
-        while j > 0 {
-            merged[k] = right[j - 1];
-            j -= 1;
-            k += 1;
-        }
-    }
-    slice.copy_from_slice(&merged);
-    true
+
+    false
 }
 
 #[inline]
@@ -109,26 +230,36 @@ fn crystal_hash(val: i32, mult: u32) -> usize {
     (((u ^ (u >> 15)).wrapping_mul(mult)) >> 23) as usize
 }
 
-fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> bool {
+/// Returns `(handled, probe_span_exceeds_horizon)`.
+fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> (bool, bool) {
     let len = slice.len();
-    if len < 128 {
-        return false;
+    if len <= 512 {
+        return (false, false);
     }
 
+    // Stratified + Tail-Burst 128-point probe (96 golden-stride points + 32 tail-window points)
     let mut probe = [0_i32; 128];
-    let step = len / 128;
-    for (i, slot) in probe.iter_mut().enumerate() {
-        *slot = slice[i * step];
+    let stride = ((len as u64 * 2_654_435_761) >> 32).max(1) as usize | 1;
+    let mut idx = len / 5;
+    for slot in probe.iter_mut().take(96) {
+        *slot = slice[idx % len];
+        idx = idx.wrapping_add(stride);
     }
+    let tail_base = len - 32;
+    probe[96..128].copy_from_slice(&slice[tail_base..tail_base + 32]);
     insertion_sort(&mut probe);
 
-    let mut unique_probe = [0_i32; 64];
+    let probe_span = (i64::from(probe[127]) - i64::from(probe[0])) as u64;
+    let horizon = (len as u64).min(BARYCENTRIC_HORIZON_MAX);
+    let span_exceeds_horizon = probe_span > horizon;
+
+    let mut unique_probe = [0_i32; 96];
     unique_probe[0] = probe[0];
     let mut u_len = 1_usize;
     for i in 1..128 {
         if probe[i] != probe[i - 1] {
-            if u_len >= 32 {
-                return false;
+            if u_len >= 64 {
+                return (false, span_exceeds_horizon);
             }
             unique_probe[u_len] = probe[i];
             u_len += 1;
@@ -183,8 +314,8 @@ fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> bool {
             let mut slot = s;
             loop {
                 if !used[slot] {
-                    if unique_count >= 64 {
-                        return false;
+                    if unique_count >= 128 {
+                        return (false, span_exceeds_horizon);
                     }
                     used[slot] = true;
                     keys[slot] = val;
@@ -201,16 +332,16 @@ fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> bool {
         }
     }
 
-    let mut nuclei = [(0_i32, 0_usize); 64];
-    let mut idx = 0_usize;
+    let mut nuclei = [(0_i32, 0_usize); 128];
+    let mut n_idx = 0_usize;
     for s in 0..512 {
         if used[s] && counts[s] > 0 {
-            nuclei[idx] = (keys[s], counts[s] as usize);
-            idx += 1;
+            nuclei[n_idx] = (keys[s], counts[s] as usize);
+            n_idx += 1;
         }
     }
 
-    for i in 1..idx {
+    for i in 1..n_idx {
         let key = nuclei[i];
         let mut j = i;
         while j > 0 && nuclei[j - 1].0 > key.0 {
@@ -221,16 +352,16 @@ fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> bool {
     }
 
     let mut offset = 0_usize;
-    for &(val, count) in &nuclei[..idx] {
+    for &(val, count) in &nuclei[..n_idx] {
         slice[offset..offset + count].fill(val);
         offset += count;
     }
-    true
+    (true, span_exceeds_horizon)
 }
 
 fn try_barycentric_condensation(slice: &mut [i32]) -> bool {
     let len = slice.len();
-    if len < 64 {
+    if len <= 512 {
         return false;
     }
 
@@ -302,8 +433,8 @@ fn scatter_pass<const SHIFT: usize, const FLIP_SIGN: bool>(
 
 fn spectral_tetra_shell_sort(slice: &mut [i32]) {
     let len = slice.len();
-    if len <= 64 {
-        insertion_sort(slice);
+    if len <= 512 {
+        in_place_small_sort(slice);
         return;
     }
 
@@ -389,16 +520,20 @@ fn spectral_tetra_shell_sort(slice: &mut [i32]) {
 }
 
 pub fn candidate_sort(data: &mut [i32]) {
-    if data.len() <= 1 {
+    if data.len() <= 512 {
+        if data.len() > 1 {
+            in_place_small_sort(data);
+        }
         return;
     }
     if try_soliton_wave_collapse(data) {
         return;
     }
-    if try_phyllotaxis_nucleation(data) {
+    let (nucleated, span_exceeds_horizon) = try_phyllotaxis_nucleation(data);
+    if nucleated {
         return;
     }
-    if try_barycentric_condensation(data) {
+    if !span_exceeds_horizon && try_barycentric_condensation(data) {
         return;
     }
     spectral_tetra_shell_sort(data);
