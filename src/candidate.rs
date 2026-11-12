@@ -1,6 +1,7 @@
-// Experiment 02: Phyllotaxis Golden-Hash Crystal Nucleation + Branchless Metatron-13
+// Experiment 03: Barycentric Event-Horizon Condensation + Phyllotaxis Nucleation + Metatron-13
 
 const GOLDEN_HASH_32: u32 = 0x9E37_79B9;
+const BARYCENTRIC_HORIZON_MAX: u64 = 1_048_576;
 
 fn insertion_sort(slice: &mut [i32]) {
     for i in 1..slice.len() {
@@ -14,15 +15,12 @@ fn insertion_sort(slice: &mut [i32]) {
     }
 }
 
-/// Attempts crystal nucleation using a 128-slot stack hash table indexed by the golden ratio.
-/// Succeeds in O(n) with zero heap allocations if the slice has <= 64 distinct values.
 fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> bool {
     let len = slice.len();
     if len < 64 {
         return false;
     }
 
-    // Quick 64-point probe to estimate cardinality before full scan
     let mut probe = [0_i32; 64];
     let step = len / 64;
     for (i, slot) in probe.iter_mut().enumerate() {
@@ -65,7 +63,6 @@ fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> bool {
         }
     }
 
-    // Collect and sort the crystal nuclei
     let mut nuclei = [(0_i32, 0_usize); 64];
     let mut idx = 0_usize;
     for s in 0..128 {
@@ -93,11 +90,63 @@ fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> bool {
     true
 }
 
+/// Condenses integers into discrete energy orbits relative to the ground state `min_val`
+/// whenever the energy span fits within the Barycentric Event Horizon.
+fn try_barycentric_condensation(slice: &mut [i32]) -> bool {
+    let len = slice.len();
+    if len < 64 {
+        return false;
+    }
+
+    let mut min_val = slice[0];
+    let mut max_val = slice[0];
+    for &x in &slice[1..] {
+        if x < min_val {
+            min_val = x;
+        }
+        if x > max_val {
+            max_val = x;
+        }
+    }
+
+    let span = (i64::from(max_val) - i64::from(min_val)) as u64;
+    if span == 0 {
+        return true;
+    }
+
+    let horizon = (len as u64).min(BARYCENTRIC_HORIZON_MAX);
+    if span > horizon {
+        return false;
+    }
+
+    let table_len = (span + 1) as usize;
+    let mut density = vec![0_u32; table_len];
+    let base = i64::from(min_val);
+    for &x in slice.iter() {
+        let orbit = (i64::from(x) - base) as usize;
+        density[orbit] += 1;
+    }
+
+    let mut offset = 0_usize;
+    for (orbit, &count) in density.iter().enumerate() {
+        if count > 0 {
+            let val = (base + orbit as i64) as i32;
+            let c = count as usize;
+            slice[offset..offset + c].fill(val);
+            offset += c;
+        }
+    }
+    true
+}
+
 pub fn candidate_sort(data: &mut [i32]) {
     if data.len() <= 1 {
         return;
     }
     if try_phyllotaxis_nucleation(data) {
+        return;
+    }
+    if try_barycentric_condensation(data) {
         return;
     }
     let mut scratch = vec![0_i32; data.len()];

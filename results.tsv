@@ -2,3 +2,4 @@ exp_id	name	inspiration	cand_geomean_ms	std_geomean_ms	speedup_vs_std	status	not
 exp00	Metatron 13-Ring Scratch	Cubo de Metatron (12 pivos, 13 intervalos)	36.639	6.053	0.17x	BASELINE	Ponto de partida: duas passagens por nivel + busca binaria com branches
 exp01	Kirkwood Branchless Metatron-13	Ressonancia orbital de Kirkwood (amostragem aurea coprima) + arvore branchless	17.817	5.849	0.33x	KEEP	Eliminou branch misprediction e reduziu Wide K=13 de 36.4ms para 7.8ms
 exp02	Phyllotaxis Crystal Nucleation	Filotaxia aurea (0x9E3779B9) + nucleacao cristalina L1 (128 slots)	7.746	5.983	0.77x	KEEP	Superou std::sort_unstable em 3.65x (K=12), 3.48x (K=13), 3.40x (K=17) e 1.15x (Wide K=13)
+exp03	Barycentric Horizon Condensation	Horizonte de eventos gravitacional (condensacao por offset E - E_min)	2.917	6.404	2.20x	KEEP	Ultrapassou std::sort_unstable na media geometrica (2.20x); 7.84x em K=1000 e 6.50x em Pareto
