@@ -1,0 +1,2 @@
+exp_id	name	inspiration	cand_geomean_ms	std_geomean_ms	speedup_vs_std	status	notes
+exp00	Metatron 13-Ring Scratch	Cubo de Metatron (12 pivos, 13 intervalos)	36.639	6.053	0.17x	BASELINE	Ponto de partida: duas passagens por nivel + busca binaria com branches
