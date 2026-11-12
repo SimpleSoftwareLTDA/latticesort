@@ -232,7 +232,7 @@ pub fn candidate_sort(data: &mut [i32]) {
     }
     let mut scratch = vec![0_i32; data.len()];
     let mut tags = vec![0_u8; data.len()];
-    metatron_recurse::<12>(data, &mut scratch, &mut tags);
+    metatron_recurse::<4>(data, &mut scratch, &mut tags);
 }
 
 fn metatron_recurse<const RING_PIVOTS: usize>(

@@ -4,3 +4,4 @@ exp01	Kirkwood Branchless Metatron-13	Ressonancia orbital de Kirkwood (amostrage
 exp02	Phyllotaxis Crystal Nucleation	Filotaxia aurea (0x9E3779B9) + nucleacao cristalina L1 (128 slots)	7.746	5.983	0.77x	KEEP	Superou std::sort_unstable em 3.65x (K=12), 3.48x (K=13), 3.40x (K=17) e 1.15x (Wide K=13)
 exp03	Barycentric Horizon Condensation	Horizonte de eventos gravitacional (condensacao por offset E - E_min)	2.917	6.404	2.20x	KEEP	Ultrapassou std::sort_unstable na media geometrica (2.20x); 7.84x em K=1000 e 6.50x em Pareto
 exp04	Soliton Standing-Wave Collapse	Ondas solitarias (KdV) + fusao linear de crista e vale	2.101	6.368	3.03x	KEEP	Reduziu Soliton Wave de 60.1ms para 3.36ms (5.98x mais rapido que std)
+exp05	Feigenbaum 5-Way Cascade	Constante de Feigenbaum (delta ~ 4.6692 -> 4 pivos / 5 intervalos)	1.936	5.993	3.09x	KEEP	Reduziu instrucoes branchless por elemento; Uniform 32-bit caiu de 69.4ms para 50.6ms
