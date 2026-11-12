@@ -1,4 +1,4 @@
-// Experiment 07: Tri-Shell 11-11-10 Atomic Spectral Projection + Soliton + Phyllotaxis + Barycentric
+// Experiment 08: Tetra-Shell 8-8-8-8 L1-Resident Spectral Projection + Soliton + Phyllotaxis + Barycentric
 
 const GOLDEN_HASH_32: u32 = 0x9E37_79B9;
 const BARYCENTRIC_HORIZON_MAX: u64 = 1_048_576;
@@ -212,89 +212,51 @@ fn try_barycentric_condensation(slice: &mut [i32]) -> bool {
     true
 }
 
-/// Tri-Shell 11-11-10 Atomic Spectral Projection for high-entropy 32-bit integers.
-fn spectral_tri_shell_sort(slice: &mut [i32]) {
+/// Tetra-Shell 8-8-8-8 L1-Resident Spectral Projection (256 write streams fit in L1 cache).
+fn spectral_tetra_shell_sort(slice: &mut [i32]) {
     let len = slice.len();
     if len <= 64 {
         insertion_sort(slice);
         return;
     }
 
-    let mut h0 = vec![0_u32; 2048];
-    let mut h1 = vec![0_u32; 2048];
-    let mut h2 = vec![0_u32; 1024];
-
+    let mut h = [[0_u32; 256]; 4];
     for &x in slice.iter() {
         let u = (x as u32) ^ 0x8000_0000;
-        h0[(u & 0x7FF) as usize] += 1;
-        h1[((u >> 11) & 0x7FF) as usize] += 1;
-        h2[(u >> 22) as usize] += 1;
+        h[0][(u & 0xFF) as usize] += 1;
+        h[1][((u >> 8) & 0xFF) as usize] += 1;
+        h[2][((u >> 16) & 0xFF) as usize] += 1;
+        h[3][(u >> 24) as usize] += 1;
     }
 
     let n32 = len as u32;
-    let active0 = !h0.contains(&n32);
-    let active1 = !h1.contains(&n32);
-    let active2 = !h2.contains(&n32);
-
     let mut scratch = vec![0_i32; len];
     let mut in_scratch = false;
 
-    if active0 {
+    for (shell, hist) in h.iter().enumerate() {
+        if hist.contains(&n32) {
+            continue;
+        }
+        let shift = shell * 8;
+        let mut offsets = [0_usize; 256];
         let mut sum = 0_usize;
-        let mut offsets = [0_usize; 2048];
-        for (i, &c) in h0.iter().enumerate() {
+        for (i, &c) in hist.iter().enumerate() {
             offsets[i] = sum;
             sum += c as usize;
         }
-        for &x in slice.iter() {
-            let b = (((x as u32) ^ 0x8000_0000) & 0x7FF) as usize;
-            scratch[offsets[b]] = x;
-            offsets[b] += 1;
-        }
-        in_scratch = true;
-    }
 
-    if active1 {
-        let mut sum = 0_usize;
-        let mut offsets = [0_usize; 2048];
-        for (i, &c) in h1.iter().enumerate() {
-            offsets[i] = sum;
-            sum += c as usize;
-        }
         if in_scratch {
             for &x in &scratch {
-                let b = ((((x as u32) ^ 0x8000_0000) >> 11) & 0x7FF) as usize;
+                let u = ((x as u32) ^ 0x8000_0000) >> shift;
+                let b = (u & 0xFF) as usize;
                 slice[offsets[b]] = x;
                 offsets[b] += 1;
             }
             in_scratch = false;
         } else {
             for &x in slice.iter() {
-                let b = ((((x as u32) ^ 0x8000_0000) >> 11) & 0x7FF) as usize;
-                scratch[offsets[b]] = x;
-                offsets[b] += 1;
-            }
-            in_scratch = true;
-        }
-    }
-
-    if active2 {
-        let mut sum = 0_usize;
-        let mut offsets = [0_usize; 1024];
-        for (i, &c) in h2.iter().enumerate() {
-            offsets[i] = sum;
-            sum += c as usize;
-        }
-        if in_scratch {
-            for &x in &scratch {
-                let b = (((x as u32) ^ 0x8000_0000) >> 22) as usize;
-                slice[offsets[b]] = x;
-                offsets[b] += 1;
-            }
-            in_scratch = false;
-        } else {
-            for &x in slice.iter() {
-                let b = (((x as u32) ^ 0x8000_0000) >> 22) as usize;
+                let u = ((x as u32) ^ 0x8000_0000) >> shift;
+                let b = (u & 0xFF) as usize;
                 scratch[offsets[b]] = x;
                 offsets[b] += 1;
             }
@@ -320,5 +282,5 @@ pub fn candidate_sort(data: &mut [i32]) {
     if try_barycentric_condensation(data) {
         return;
     }
-    spectral_tri_shell_sort(data);
+    spectral_tetra_shell_sort(data);
 }
