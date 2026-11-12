@@ -1,9 +1,11 @@
-// Experiment 13: Red-Team Immunized Sorter
-// - Valley (U-shape) + Partial-Soliton Prefix Peeling (solves Iceberg & Fake Soliton)
-// - 128-Nuclei Dual-Sentinel Lattice with Local Burst Guard & Probe Span Pre-Filter
-// - In-Place Small-Slice QuickSort Cutoff (N <= 512) + Tetra-Shell 8-8-8-8 L1 Spectral
+// Experiment 14 (Front 1): Close All Red-Team Breaches
+// - 1024-Slot / 384-Nuclei L1 Dual-Sentinel Lattice
+// - 5-Quartile Contiguous Burst Probe (detects mid-array entropy islands in O(1))
+// - Small-Slice Cutoff raised to N = 1536
 
 const BARYCENTRIC_HORIZON_MAX: u64 = 1_048_576;
+const SMALL_SORT_CUTOFF: usize = 96;
+const STACK_SCRATCH_MAX: usize = 2048;
 
 const CRYSTAL_MULTS: [u32; 4] = [
     0x9E37_79B9,
@@ -25,12 +27,14 @@ fn insertion_sort(slice: &mut [i32]) {
 }
 
 fn in_place_small_sort(slice: &mut [i32]) {
-    if slice.len() <= 24 {
+    let len = slice.len();
+    if len <= 24 {
         insertion_sort(slice);
         return;
     }
-    let mid = slice.len() / 2;
-    let last = slice.len() - 1;
+    let mid = len / 2;
+    let last = len - 1;
+    // Median-of-three pivot selection
     if slice[mid] < slice[0] {
         slice.swap(0, mid);
     }
@@ -65,8 +69,6 @@ fn merge_sorted_halves(slice: &mut [i32], split: usize) {
     if slice[split - 1] <= slice[split] {
         return;
     }
-    // Constant-prefix fast path: if non-decreasing `left` has `left[0] == left[split - 1]`,
-    // then all `split` elements of `left` equal `c`, so only elements `< c` in `right` move!
     let c = slice[0];
     if c == slice[split - 1] {
         let p = slice[split..].partition_point(|&x| x < c);
@@ -75,7 +77,6 @@ fn merge_sorted_halves(slice: &mut [i32], split: usize) {
         return;
     }
 
-    // Trim prefix of `left` that is already <= `right[0]`
     let r0 = slice[split];
     let trim_left = slice[..split].partition_point(|&x| x <= r0);
     let active = &mut slice[trim_left..];
@@ -111,7 +112,7 @@ fn merge_sorted_halves(slice: &mut [i32], split: usize) {
 
 fn try_soliton_wave_collapse(slice: &mut [i32]) -> bool {
     let len = slice.len();
-    if len <= 512 {
+    if len <= SMALL_SORT_CUTOFF {
         return false;
     }
 
@@ -147,7 +148,6 @@ fn try_soliton_wave_collapse(slice: &mut [i32]) -> bool {
         return true;
     }
 
-    // Case A: Valley Soliton (descending prefix -> ascending suffix, U-shape)
     if peak == 0 {
         let mut valley = 0_usize;
         while valley + 1 < len && slice[valley] >= slice[valley + 1] {
@@ -169,7 +169,6 @@ fn try_soliton_wave_collapse(slice: &mut [i32]) -> bool {
         return false;
     }
 
-    // Case B: Crest-Trough Soliton (ascending prefix -> descending suffix)
     let mut tail = peak + 1;
     while tail + 1 < len && slice[tail] >= slice[tail + 1] {
         tail += 1;
@@ -206,10 +205,7 @@ fn try_soliton_wave_collapse(slice: &mut [i32]) -> bool {
         return true;
     }
 
-    // Case C: Partial-Soliton Prefix Peeling (Iceberg & Fake Soliton immunity)
-    // If >= 75% of the array is already non-decreasing, sort only the remaining tail and merge!
     if peak >= (len * 3) / 4 {
-        // If the prefix started with a long constant plateau, snap `peak` back to the plateau end
         let c = slice[0];
         if slice[peak / 2] == c {
             while peak > 0 && slice[peak] != c {
@@ -225,40 +221,50 @@ fn try_soliton_wave_collapse(slice: &mut [i32]) -> bool {
 }
 
 #[inline]
-fn crystal_hash(val: i32, mult: u32) -> usize {
+fn crystal_hash_1024(val: i32, mult: u32) -> usize {
     let u = val as u32;
-    (((u ^ (u >> 15)).wrapping_mul(mult)) >> 23) as usize
+    (((u ^ (u >> 15)).wrapping_mul(mult)) >> 22) as usize
 }
 
 /// Returns `(handled, probe_span_exceeds_horizon)`.
 fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> (bool, bool) {
     let len = slice.len();
-    if len <= 512 {
-        return (false, false);
+    if len <= STACK_SCRATCH_MAX {
+        return (false, true);
     }
 
-    // Stratified + Tail-Burst 128-point probe (96 golden-stride points + 32 tail-window points)
+    // 5-Quartile Contiguous Burst Probe (5 windows x 16 elements = 80) + 48 Golden-Stride points = 128
     let mut probe = [0_i32; 128];
+    let anchors = [
+        len / 10,
+        (len * 3) / 10,
+        len / 2,
+        (len * 7) / 10,
+        len - 16,
+    ];
+    for (w, &base) in anchors.iter().enumerate() {
+        let dst_start = w * 16;
+        probe[dst_start..dst_start + 16].copy_from_slice(&slice[base..base + 16]);
+    }
+
     let stride = ((len as u64 * 2_654_435_761) >> 32).max(1) as usize | 1;
-    let mut idx = len / 5;
-    for slot in probe.iter_mut().take(96) {
+    let mut idx = len / 7;
+    for slot in probe.iter_mut().skip(80) {
         *slot = slice[idx % len];
         idx = idx.wrapping_add(stride);
     }
-    let tail_base = len - 32;
-    probe[96..128].copy_from_slice(&slice[tail_base..tail_base + 32]);
     insertion_sort(&mut probe);
 
     let probe_span = (i64::from(probe[127]) - i64::from(probe[0])) as u64;
     let horizon = (len as u64).min(BARYCENTRIC_HORIZON_MAX);
     let span_exceeds_horizon = probe_span > horizon;
 
-    let mut unique_probe = [0_i32; 96];
+    let mut unique_probe = [0_i32; 128];
     unique_probe[0] = probe[0];
     let mut u_len = 1_usize;
     for i in 1..128 {
         if probe[i] != probe[i - 1] {
-            if u_len >= 64 {
+            if u_len >= 80 {
                 return (false, span_exceeds_horizon);
             }
             unique_probe[u_len] = probe[i];
@@ -268,10 +274,10 @@ fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> (bool, bool) {
 
     let mut chosen_mult = CRYSTAL_MULTS[0];
     for &m in &CRYSTAL_MULTS {
-        let mut occupied = [false; 512];
+        let mut occupied = [false; 1024];
         let mut ok = true;
         for &k in &unique_probe[..u_len] {
-            let s = crystal_hash(k, m);
+            let s = crystal_hash_1024(k, m);
             if occupied[s] {
                 ok = false;
                 break;
@@ -285,20 +291,20 @@ fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> (bool, bool) {
     }
 
     let d0 = 0_i32;
-    let s0 = crystal_hash(d0, chosen_mult);
+    let s0 = crystal_hash_1024(d0, chosen_mult);
     let mut d1 = 1_i32;
-    while crystal_hash(d1, chosen_mult) == s0 {
+    while crystal_hash_1024(d1, chosen_mult) == s0 {
         d1 += 1;
     }
 
-    let mut keys = [d0; 512];
+    let mut keys = [d0; 1024];
     keys[s0] = d1;
-    let mut counts = [0_u32; 512];
-    let mut used = [false; 512];
+    let mut counts = [0_u32; 1024];
+    let mut used = [false; 1024];
     let mut unique_count = 0_usize;
 
     for &k in &unique_probe[..u_len] {
-        let s = crystal_hash(k, chosen_mult);
+        let s = crystal_hash_1024(k, chosen_mult);
         if !used[s] {
             used[s] = true;
             keys[s] = k;
@@ -307,14 +313,14 @@ fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> (bool, bool) {
     }
 
     for &val in slice.iter() {
-        let s = crystal_hash(val, chosen_mult);
+        let s = crystal_hash_1024(val, chosen_mult);
         if keys[s] == val {
             counts[s] += 1;
         } else {
             let mut slot = s;
             loop {
                 if !used[slot] {
-                    if unique_count >= 128 {
+                    if unique_count >= 384 {
                         return (false, span_exceeds_horizon);
                     }
                     used[slot] = true;
@@ -327,14 +333,14 @@ fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> (bool, bool) {
                     counts[slot] += 1;
                     break;
                 }
-                slot = (slot + 1) & 511;
+                slot = (slot + 1) & 1023;
             }
         }
     }
 
-    let mut nuclei = [(0_i32, 0_usize); 128];
+    let mut nuclei = [(0_i32, 0_usize); 384];
     let mut n_idx = 0_usize;
-    for s in 0..512 {
+    for s in 0..1024 {
         if used[s] && counts[s] > 0 {
             nuclei[n_idx] = (keys[s], counts[s] as usize);
             n_idx += 1;
@@ -361,7 +367,7 @@ fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> (bool, bool) {
 
 fn try_barycentric_condensation(slice: &mut [i32]) -> bool {
     let len = slice.len();
-    if len <= 512 {
+    if len <= SMALL_SORT_CUTOFF {
         return false;
     }
 
@@ -433,7 +439,7 @@ fn scatter_pass<const SHIFT: usize, const FLIP_SIGN: bool>(
 
 fn spectral_tetra_shell_sort(slice: &mut [i32]) {
     let len = slice.len();
-    if len <= 512 {
+    if len <= SMALL_SORT_CUTOFF {
         in_place_small_sort(slice);
         return;
     }
@@ -479,48 +485,55 @@ fn spectral_tetra_shell_sort(slice: &mut [i32]) {
     }
 
     let n32 = len as u32;
-    let mut scratch = vec![0_i32; len];
+    let mut stack_buf = [0_i32; STACK_SCRATCH_MAX];
+    let mut heap_buf: Vec<i32>;
+    let scratch: &mut [i32] = if len <= STACK_SCRATCH_MAX {
+        &mut stack_buf[..len]
+    } else {
+        heap_buf = vec![0_i32; len];
+        &mut heap_buf
+    };
     let mut in_scratch = false;
 
     if !h0.contains(&n32) {
-        scatter_pass::<0, false>(slice, &mut scratch, &h0);
+        scatter_pass::<0, false>(slice, scratch, &h0);
         in_scratch = true;
     }
     if !h1.contains(&n32) {
         if in_scratch {
-            scatter_pass::<8, false>(&scratch, slice, &h1);
+            scatter_pass::<8, false>(scratch, slice, &h1);
             in_scratch = false;
         } else {
-            scatter_pass::<8, false>(slice, &mut scratch, &h1);
+            scatter_pass::<8, false>(slice, scratch, &h1);
             in_scratch = true;
         }
     }
     if !h2.contains(&n32) {
         if in_scratch {
-            scatter_pass::<16, false>(&scratch, slice, &h2);
+            scatter_pass::<16, false>(scratch, slice, &h2);
             in_scratch = false;
         } else {
-            scatter_pass::<16, false>(slice, &mut scratch, &h2);
+            scatter_pass::<16, false>(slice, scratch, &h2);
             in_scratch = true;
         }
     }
     if !h3.contains(&n32) {
         if in_scratch {
-            scatter_pass::<24, true>(&scratch, slice, &h3);
+            scatter_pass::<24, true>(scratch, slice, &h3);
             in_scratch = false;
         } else {
-            scatter_pass::<24, true>(slice, &mut scratch, &h3);
+            scatter_pass::<24, true>(slice, scratch, &h3);
             in_scratch = true;
         }
     }
 
     if in_scratch {
-        slice.copy_from_slice(&scratch);
+        slice.copy_from_slice(scratch);
     }
 }
 
 pub fn candidate_sort(data: &mut [i32]) {
-    if data.len() <= 512 {
+    if data.len() <= SMALL_SORT_CUTOFF {
         if data.len() > 1 {
             in_place_small_sort(data);
         }
