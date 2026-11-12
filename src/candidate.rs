@@ -72,28 +72,32 @@ fn try_soliton_wave_collapse(slice: &mut [i32]) -> bool {
         return true;
     }
 
-    slice[peak + 1..].reverse();
     let mut merged = vec![0_i32; len];
     let (left, right) = slice.split_at(peak + 1);
     let mut i = 0_usize;
-    let mut j = 0_usize;
+    let mut j = right.len();
     let mut k = 0_usize;
-    while i < left.len() && j < right.len() {
-        if left[i] <= right[j] {
-            merged[k] = left[i];
+    while i < left.len() && j > 0 {
+        let a = left[i];
+        let b = right[j - 1];
+        if a <= b {
+            merged[k] = a;
             i += 1;
         } else {
-            merged[k] = right[j];
-            j += 1;
+            merged[k] = b;
+            j -= 1;
         }
         k += 1;
     }
     if i < left.len() {
         let rem = left.len() - i;
         merged[k..k + rem].copy_from_slice(&left[i..]);
-    } else if j < right.len() {
-        let rem = right.len() - j;
-        merged[k..k + rem].copy_from_slice(&right[j..]);
+    } else {
+        while j > 0 {
+            merged[k] = right[j - 1];
+            j -= 1;
+            k += 1;
+        }
     }
     slice.copy_from_slice(&merged);
     true
@@ -284,42 +288,7 @@ fn scatter_pass<const SHIFT: usize, const FLIP_SIGN: bool>(
         sum += c as usize;
     }
 
-    let (chunks, rem) = src.as_chunks::<4>();
-    for c in chunks {
-        let b0 = if FLIP_SIGN {
-            (((c[0] as u32) >> SHIFT ^ 0x80) & 0xFF) as usize
-        } else {
-            (((c[0] as u32) >> SHIFT) & 0xFF) as usize
-        };
-        dst[offsets[b0]] = c[0];
-        offsets[b0] += 1;
-
-        let b1 = if FLIP_SIGN {
-            (((c[1] as u32) >> SHIFT ^ 0x80) & 0xFF) as usize
-        } else {
-            (((c[1] as u32) >> SHIFT) & 0xFF) as usize
-        };
-        dst[offsets[b1]] = c[1];
-        offsets[b1] += 1;
-
-        let b2 = if FLIP_SIGN {
-            (((c[2] as u32) >> SHIFT ^ 0x80) & 0xFF) as usize
-        } else {
-            (((c[2] as u32) >> SHIFT) & 0xFF) as usize
-        };
-        dst[offsets[b2]] = c[2];
-        offsets[b2] += 1;
-
-        let b3 = if FLIP_SIGN {
-            (((c[3] as u32) >> SHIFT ^ 0x80) & 0xFF) as usize
-        } else {
-            (((c[3] as u32) >> SHIFT) & 0xFF) as usize
-        };
-        dst[offsets[b3]] = c[3];
-        offsets[b3] += 1;
-    }
-
-    for &x in rem {
+    for &x in src {
         let raw = (x as u32) >> SHIFT;
         let b = if FLIP_SIGN {
             ((raw ^ 0x80) & 0xFF) as usize
