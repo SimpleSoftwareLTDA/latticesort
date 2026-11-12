@@ -1,4 +1,6 @@
-// Experiment 01: Kirkwood Coprime Golden Sampling + Cached Bucket Indices (Single-Lookup Metatron-13)
+// Experiment 02: Phyllotaxis Golden-Hash Crystal Nucleation + Branchless Metatron-13
+
+const GOLDEN_HASH_32: u32 = 0x9E37_79B9;
 
 fn insertion_sort(slice: &mut [i32]) {
     for i in 1..slice.len() {
@@ -12,8 +14,90 @@ fn insertion_sort(slice: &mut [i32]) {
     }
 }
 
+/// Attempts crystal nucleation using a 128-slot stack hash table indexed by the golden ratio.
+/// Succeeds in O(n) with zero heap allocations if the slice has <= 64 distinct values.
+fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> bool {
+    let len = slice.len();
+    if len < 64 {
+        return false;
+    }
+
+    // Quick 64-point probe to estimate cardinality before full scan
+    let mut probe = [0_i32; 64];
+    let step = len / 64;
+    for (i, slot) in probe.iter_mut().enumerate() {
+        *slot = slice[i * step];
+    }
+    insertion_sort(&mut probe);
+    let mut distinct_probe = 1_usize;
+    for i in 1..64 {
+        if probe[i] != probe[i - 1] {
+            distinct_probe += 1;
+        }
+    }
+    if distinct_probe > 28 {
+        return false;
+    }
+
+    let mut keys = [0_i32; 128];
+    let mut counts = [0_u32; 128];
+    let mut used = [false; 128];
+    let mut unique_count = 0_usize;
+
+    for &val in slice.iter() {
+        let mut slot = ((val as u32).wrapping_mul(GOLDEN_HASH_32) >> 25) as usize;
+        loop {
+            if !used[slot] {
+                if unique_count >= 64 {
+                    return false;
+                }
+                used[slot] = true;
+                keys[slot] = val;
+                counts[slot] = 1;
+                unique_count += 1;
+                break;
+            }
+            if keys[slot] == val {
+                counts[slot] += 1;
+                break;
+            }
+            slot = (slot + 1) & 127;
+        }
+    }
+
+    // Collect and sort the crystal nuclei
+    let mut nuclei = [(0_i32, 0_usize); 64];
+    let mut idx = 0_usize;
+    for s in 0..128 {
+        if used[s] {
+            nuclei[idx] = (keys[s], counts[s] as usize);
+            idx += 1;
+        }
+    }
+
+    for i in 1..unique_count {
+        let key = nuclei[i];
+        let mut j = i;
+        while j > 0 && nuclei[j - 1].0 > key.0 {
+            nuclei[j] = nuclei[j - 1];
+            j -= 1;
+        }
+        nuclei[j] = key;
+    }
+
+    let mut offset = 0_usize;
+    for &(val, count) in &nuclei[..unique_count] {
+        slice[offset..offset + count].fill(val);
+        offset += count;
+    }
+    true
+}
+
 pub fn candidate_sort(data: &mut [i32]) {
     if data.len() <= 1 {
+        return;
+    }
+    if try_phyllotaxis_nucleation(data) {
         return;
     }
     let mut scratch = vec![0_i32; data.len()];
@@ -35,7 +119,6 @@ fn metatron_recurse<const RING_PIVOTS: usize>(
         return;
     }
 
-    // Golden-ratio quasi-random sampling (avoids rational resonance on periodic inputs)
     let sample_cap = RING_PIVOTS * 2;
     let mut samples = [0_i32; 24];
     let actual_samples = sample_cap.min(24);
@@ -63,14 +146,12 @@ fn metatron_recurse<const RING_PIVOTS: usize>(
     let mut counts = [0_usize; 27];
     let active_pivots = &pivots[..k];
 
-    // Pass 1: Locate bucket once per element and cache in `tags`
     for (i, &val) in slice.iter().enumerate() {
         let b = locate_bucket_branchless(active_pivots, val);
         tags[i] = b as u8;
         counts[b] += 1;
     }
 
-    // Fast path: if all elements matched a single equality bucket, slice is already uniform!
     for b in 0..k {
         if counts[2 * b + 1] == len {
             return;
