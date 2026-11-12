@@ -1,7 +1,13 @@
-// Experiment 08: Tetra-Shell 8-8-8-8 L1-Resident Spectral Projection + Soliton + Phyllotaxis + Barycentric
+// Experiment 09: Self-Verifying Dual-Sentinel Crystal Lattice + Tetra-Shell 8-8-8-8 + Soliton
 
-const GOLDEN_HASH_32: u32 = 0x9E37_79B9;
 const BARYCENTRIC_HORIZON_MAX: u64 = 1_048_576;
+
+const CRYSTAL_MULTS: [u32; 4] = [
+    0x9E37_79B9, // Golden ratio phi^-1
+    0x85EB_CA6B, // Murmur3 avalanche constant
+    0xC2B2_AE35, // Prime quasi-crystal harmonic
+    0x27D4_EB2F, // Coprime tetrahedral mixer
+];
 
 fn insertion_sort(slice: &mut [i32]) {
     for i in 1..slice.len() {
@@ -67,87 +73,147 @@ fn try_soliton_wave_collapse(slice: &mut [i32]) -> bool {
     }
 
     slice[peak + 1..].reverse();
-    let mut merged = Vec::with_capacity(len);
+    let mut merged = vec![0_i32; len];
     let (left, right) = slice.split_at(peak + 1);
     let mut i = 0_usize;
     let mut j = 0_usize;
+    let mut k = 0_usize;
     while i < left.len() && j < right.len() {
         if left[i] <= right[j] {
-            merged.push(left[i]);
+            merged[k] = left[i];
             i += 1;
         } else {
-            merged.push(right[j]);
+            merged[k] = right[j];
             j += 1;
         }
+        k += 1;
     }
     if i < left.len() {
-        merged.extend_from_slice(&left[i..]);
-    }
-    if j < right.len() {
-        merged.extend_from_slice(&right[j..]);
+        let rem = left.len() - i;
+        merged[k..k + rem].copy_from_slice(&left[i..]);
+    } else if j < right.len() {
+        let rem = right.len() - j;
+        merged[k..k + rem].copy_from_slice(&right[j..]);
     }
     slice.copy_from_slice(&merged);
     true
 }
 
+#[inline]
+fn crystal_hash(val: i32, mult: u32) -> usize {
+    let u = val as u32;
+    (((u ^ (u >> 15)).wrapping_mul(mult)) >> 23) as usize
+}
+
+/// Self-Verifying Dual-Sentinel Crystal Lattice:
+/// Initializes unused slots with a sentinel whose hash != slot, making `keys[slot] == val`
+/// both necessary and sufficient without checking an occupancy bitmap in the hot loop.
 fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> bool {
     let len = slice.len();
-    if len < 64 {
+    if len < 128 {
         return false;
     }
 
-    let mut probe = [0_i32; 64];
-    let step = len / 64;
+    let mut probe = [0_i32; 128];
+    let step = len / 128;
     for (i, slot) in probe.iter_mut().enumerate() {
         *slot = slice[i * step];
     }
     insertion_sort(&mut probe);
-    let mut distinct_probe = 1_usize;
-    for i in 1..64 {
+
+    let mut unique_probe = [0_i32; 64];
+    unique_probe[0] = probe[0];
+    let mut u_len = 1_usize;
+    for i in 1..128 {
         if probe[i] != probe[i - 1] {
-            distinct_probe += 1;
+            if u_len >= 32 {
+                return false;
+            }
+            unique_probe[u_len] = probe[i];
+            u_len += 1;
         }
     }
-    if distinct_probe > 28 {
-        return false;
+
+    // Select a harmonic multiplier that maps all `u_len` probed nuclei into 512 slots with 0 collisions
+    let mut chosen_mult = CRYSTAL_MULTS[0];
+    for &m in &CRYSTAL_MULTS {
+        let mut occupied = [false; 512];
+        let mut ok = true;
+        for &k in &unique_probe[..u_len] {
+            let s = crystal_hash(k, m);
+            if occupied[s] {
+                ok = false;
+                break;
+            }
+            occupied[s] = true;
+        }
+        if ok {
+            chosen_mult = m;
+            break;
+        }
     }
 
-    let mut keys = [0_i32; 128];
-    let mut counts = [0_u32; 128];
-    let mut used = [false; 128];
+    // Build dual-sentinel self-verifying table of 512 slots
+    let d0 = 0_i32;
+    let s0 = crystal_hash(d0, chosen_mult);
+    let mut d1 = 1_i32;
+    while crystal_hash(d1, chosen_mult) == s0 {
+        d1 += 1;
+    }
+
+    let mut keys = [d0; 512];
+    keys[s0] = d1;
+    let mut counts = [0_u32; 512];
+    let mut used = [false; 512];
     let mut unique_count = 0_usize;
 
+    // Pre-seed the collision-free probed nuclei
+    for &k in &unique_probe[..u_len] {
+        let s = crystal_hash(k, chosen_mult);
+        if !used[s] {
+            used[s] = true;
+            keys[s] = k;
+            unique_count += 1;
+        }
+    }
+
+    // Fast direct-mapped loop with fallback for late-arriving unseen keys
     for &val in slice.iter() {
-        let mut slot = ((val as u32).wrapping_mul(GOLDEN_HASH_32) >> 25) as usize;
-        loop {
-            if !used[slot] {
-                if unique_count >= 64 {
-                    return false;
+        let s = crystal_hash(val, chosen_mult);
+        if keys[s] == val {
+            counts[s] += 1;
+        } else {
+            let mut slot = s;
+            loop {
+                if !used[slot] {
+                    if unique_count >= 64 {
+                        return false;
+                    }
+                    used[slot] = true;
+                    keys[slot] = val;
+                    counts[slot] = 1;
+                    unique_count += 1;
+                    break;
                 }
-                used[slot] = true;
-                keys[slot] = val;
-                counts[slot] = 1;
-                unique_count += 1;
-                break;
+                if keys[slot] == val {
+                    counts[slot] += 1;
+                    break;
+                }
+                slot = (slot + 1) & 511;
             }
-            if keys[slot] == val {
-                counts[slot] += 1;
-                break;
-            }
-            slot = (slot + 1) & 127;
         }
     }
 
     let mut nuclei = [(0_i32, 0_usize); 64];
     let mut idx = 0_usize;
-    for s in 0..128 {
-        if used[s] {
+    for s in 0..512 {
+        if used[s] && counts[s] > 0 {
             nuclei[idx] = (keys[s], counts[s] as usize);
             idx += 1;
         }
     }
 
-    for i in 1..unique_count {
+    for i in 1..idx {
         let key = nuclei[i];
         let mut j = i;
         while j > 0 && nuclei[j - 1].0 > key.0 {
@@ -158,7 +224,7 @@ fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> bool {
     }
 
     let mut offset = 0_usize;
-    for &(val, count) in &nuclei[..unique_count] {
+    for &(val, count) in &nuclei[..idx] {
         slice[offset..offset + count].fill(val);
         offset += count;
     }
@@ -212,7 +278,6 @@ fn try_barycentric_condensation(slice: &mut [i32]) -> bool {
     true
 }
 
-/// Tetra-Shell 8-8-8-8 L1-Resident Spectral Projection (256 write streams fit in L1 cache).
 fn spectral_tetra_shell_sort(slice: &mut [i32]) {
     let len = slice.len();
     if len <= 64 {
