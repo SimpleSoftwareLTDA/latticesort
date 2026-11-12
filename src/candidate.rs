@@ -1,12 +1,12 @@
-// Experiment 09: Self-Verifying Dual-Sentinel Crystal Lattice + Tetra-Shell 8-8-8-8 + Soliton
+// Experiment 10: Branchless CMOV Soliton Merge + 4x Unrolled Constant-Shift Tetra-Shell Spectral
 
 const BARYCENTRIC_HORIZON_MAX: u64 = 1_048_576;
 
 const CRYSTAL_MULTS: [u32; 4] = [
-    0x9E37_79B9, // Golden ratio phi^-1
-    0x85EB_CA6B, // Murmur3 avalanche constant
-    0xC2B2_AE35, // Prime quasi-crystal harmonic
-    0x27D4_EB2F, // Coprime tetrahedral mixer
+    0x9E37_79B9,
+    0x85EB_CA6B,
+    0xC2B2_AE35,
+    0x27D4_EB2F,
 ];
 
 fn insertion_sort(slice: &mut [i32]) {
@@ -105,9 +105,6 @@ fn crystal_hash(val: i32, mult: u32) -> usize {
     (((u ^ (u >> 15)).wrapping_mul(mult)) >> 23) as usize
 }
 
-/// Self-Verifying Dual-Sentinel Crystal Lattice:
-/// Initializes unused slots with a sentinel whose hash != slot, making `keys[slot] == val`
-/// both necessary and sufficient without checking an occupancy bitmap in the hot loop.
 fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> bool {
     let len = slice.len();
     if len < 128 {
@@ -134,7 +131,6 @@ fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> bool {
         }
     }
 
-    // Select a harmonic multiplier that maps all `u_len` probed nuclei into 512 slots with 0 collisions
     let mut chosen_mult = CRYSTAL_MULTS[0];
     for &m in &CRYSTAL_MULTS {
         let mut occupied = [false; 512];
@@ -153,7 +149,6 @@ fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> bool {
         }
     }
 
-    // Build dual-sentinel self-verifying table of 512 slots
     let d0 = 0_i32;
     let s0 = crystal_hash(d0, chosen_mult);
     let mut d1 = 1_i32;
@@ -167,7 +162,6 @@ fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> bool {
     let mut used = [false; 512];
     let mut unique_count = 0_usize;
 
-    // Pre-seed the collision-free probed nuclei
     for &k in &unique_probe[..u_len] {
         let s = crystal_hash(k, chosen_mult);
         if !used[s] {
@@ -177,7 +171,6 @@ fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> bool {
         }
     }
 
-    // Fast direct-mapped loop with fallback for late-arriving unseen keys
     for &val in slice.iter() {
         let s = crystal_hash(val, chosen_mult);
         if keys[s] == val {
@@ -278,6 +271,66 @@ fn try_barycentric_condensation(slice: &mut [i32]) -> bool {
     true
 }
 
+#[inline]
+fn scatter_pass<const SHIFT: usize, const FLIP_SIGN: bool>(
+    src: &[i32],
+    dst: &mut [i32],
+    hist: &[u32; 256],
+) {
+    let mut offsets = [0_usize; 256];
+    let mut sum = 0_usize;
+    for (i, &c) in hist.iter().enumerate() {
+        offsets[i] = sum;
+        sum += c as usize;
+    }
+
+    let (chunks, rem) = src.as_chunks::<4>();
+    for c in chunks {
+        let b0 = if FLIP_SIGN {
+            (((c[0] as u32) >> SHIFT ^ 0x80) & 0xFF) as usize
+        } else {
+            (((c[0] as u32) >> SHIFT) & 0xFF) as usize
+        };
+        dst[offsets[b0]] = c[0];
+        offsets[b0] += 1;
+
+        let b1 = if FLIP_SIGN {
+            (((c[1] as u32) >> SHIFT ^ 0x80) & 0xFF) as usize
+        } else {
+            (((c[1] as u32) >> SHIFT) & 0xFF) as usize
+        };
+        dst[offsets[b1]] = c[1];
+        offsets[b1] += 1;
+
+        let b2 = if FLIP_SIGN {
+            (((c[2] as u32) >> SHIFT ^ 0x80) & 0xFF) as usize
+        } else {
+            (((c[2] as u32) >> SHIFT) & 0xFF) as usize
+        };
+        dst[offsets[b2]] = c[2];
+        offsets[b2] += 1;
+
+        let b3 = if FLIP_SIGN {
+            (((c[3] as u32) >> SHIFT ^ 0x80) & 0xFF) as usize
+        } else {
+            (((c[3] as u32) >> SHIFT) & 0xFF) as usize
+        };
+        dst[offsets[b3]] = c[3];
+        offsets[b3] += 1;
+    }
+
+    for &x in rem {
+        let raw = (x as u32) >> SHIFT;
+        let b = if FLIP_SIGN {
+            ((raw ^ 0x80) & 0xFF) as usize
+        } else {
+            (raw & 0xFF) as usize
+        };
+        dst[offsets[b]] = x;
+        offsets[b] += 1;
+    }
+}
+
 fn spectral_tetra_shell_sort(slice: &mut [i32]) {
     let len = slice.len();
     if len <= 64 {
@@ -285,46 +338,78 @@ fn spectral_tetra_shell_sort(slice: &mut [i32]) {
         return;
     }
 
-    let mut h = [[0_u32; 256]; 4];
-    for &x in slice.iter() {
-        let u = (x as u32) ^ 0x8000_0000;
-        h[0][(u & 0xFF) as usize] += 1;
-        h[1][((u >> 8) & 0xFF) as usize] += 1;
-        h[2][((u >> 16) & 0xFF) as usize] += 1;
-        h[3][(u >> 24) as usize] += 1;
+    let mut h0 = [0_u32; 256];
+    let mut h1 = [0_u32; 256];
+    let mut h2 = [0_u32; 256];
+    let mut h3 = [0_u32; 256];
+
+    let (chunks, rem) = slice.as_chunks::<4>();
+    for c in chunks {
+        let u0 = c[0] as u32;
+        let u1 = c[1] as u32;
+        let u2 = c[2] as u32;
+        let u3 = c[3] as u32;
+
+        h0[(u0 & 0xFF) as usize] += 1;
+        h1[((u0 >> 8) & 0xFF) as usize] += 1;
+        h2[((u0 >> 16) & 0xFF) as usize] += 1;
+        h3[((u0 >> 24) ^ 0x80) as usize] += 1;
+
+        h0[(u1 & 0xFF) as usize] += 1;
+        h1[((u1 >> 8) & 0xFF) as usize] += 1;
+        h2[((u1 >> 16) & 0xFF) as usize] += 1;
+        h3[((u1 >> 24) ^ 0x80) as usize] += 1;
+
+        h0[(u2 & 0xFF) as usize] += 1;
+        h1[((u2 >> 8) & 0xFF) as usize] += 1;
+        h2[((u2 >> 16) & 0xFF) as usize] += 1;
+        h3[((u2 >> 24) ^ 0x80) as usize] += 1;
+
+        h0[(u3 & 0xFF) as usize] += 1;
+        h1[((u3 >> 8) & 0xFF) as usize] += 1;
+        h2[((u3 >> 16) & 0xFF) as usize] += 1;
+        h3[((u3 >> 24) ^ 0x80) as usize] += 1;
+    }
+    for &x in rem {
+        let u = x as u32;
+        h0[(u & 0xFF) as usize] += 1;
+        h1[((u >> 8) & 0xFF) as usize] += 1;
+        h2[((u >> 16) & 0xFF) as usize] += 1;
+        h3[((u >> 24) ^ 0x80) as usize] += 1;
     }
 
     let n32 = len as u32;
     let mut scratch = vec![0_i32; len];
     let mut in_scratch = false;
 
-    for (shell, hist) in h.iter().enumerate() {
-        if hist.contains(&n32) {
-            continue;
-        }
-        let shift = shell * 8;
-        let mut offsets = [0_usize; 256];
-        let mut sum = 0_usize;
-        for (i, &c) in hist.iter().enumerate() {
-            offsets[i] = sum;
-            sum += c as usize;
-        }
-
+    if !h0.contains(&n32) {
+        scatter_pass::<0, false>(slice, &mut scratch, &h0);
+        in_scratch = true;
+    }
+    if !h1.contains(&n32) {
         if in_scratch {
-            for &x in &scratch {
-                let u = ((x as u32) ^ 0x8000_0000) >> shift;
-                let b = (u & 0xFF) as usize;
-                slice[offsets[b]] = x;
-                offsets[b] += 1;
-            }
+            scatter_pass::<8, false>(&scratch, slice, &h1);
             in_scratch = false;
         } else {
-            for &x in slice.iter() {
-                let u = ((x as u32) ^ 0x8000_0000) >> shift;
-                let b = (u & 0xFF) as usize;
-                scratch[offsets[b]] = x;
-                offsets[b] += 1;
-            }
+            scatter_pass::<8, false>(slice, &mut scratch, &h1);
+            in_scratch = true;
+        }
+    }
+    if !h2.contains(&n32) {
+        if in_scratch {
+            scatter_pass::<16, false>(&scratch, slice, &h2);
+            in_scratch = false;
+        } else {
+            scatter_pass::<16, false>(slice, &mut scratch, &h2);
+            in_scratch = true;
+        }
+    }
+    if !h3.contains(&n32) {
+        if in_scratch {
+            scatter_pass::<24, true>(&scratch, slice, &h3);
+            in_scratch = false;
+        } else {
+            scatter_pass::<24, true>(slice, &mut scratch, &h3);
             in_scratch = true;
         }
     }
