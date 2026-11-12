@@ -111,7 +111,7 @@ fn merge_sorted_halves(slice: &mut [i32], split: usize) {
     active.copy_from_slice(&merged);
 }
 
-fn try_soliton_wave_collapse(slice: &mut [i32]) -> bool {
+pub fn try_soliton_wave_collapse(slice: &mut [i32]) -> bool {
     let len = slice.len();
     if len <= SMALL_SORT_CUTOFF {
         return false;
@@ -228,7 +228,7 @@ fn crystal_hash_1024(val: i32, mult: u32) -> usize {
 }
 
 /// Returns `(handled, probe_span_exceeds_horizon)`.
-fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> (bool, bool) {
+pub fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> (bool, bool) {
     let len = slice.len();
     if len <= STACK_SCRATCH_MAX {
         return (false, true);
@@ -366,7 +366,7 @@ fn try_phyllotaxis_nucleation(slice: &mut [i32]) -> (bool, bool) {
     (true, span_exceeds_horizon)
 }
 
-fn try_barycentric_condensation(slice: &mut [i32]) -> bool {
+pub fn try_barycentric_condensation(slice: &mut [i32]) -> bool {
     let len = slice.len();
     if len <= SMALL_SORT_CUTOFF {
         return false;
@@ -414,7 +414,7 @@ fn try_barycentric_condensation(slice: &mut [i32]) -> bool {
 }
 
 #[inline]
-fn scatter_pass<const SHIFT: usize, const FLIP_SIGN: bool>(
+pub fn scatter_pass<const SHIFT: usize, const FLIP_SIGN: bool>(
     src: &[i32],
     dst: &mut [i32],
     hist: &[u32; 256],
@@ -438,7 +438,7 @@ fn scatter_pass<const SHIFT: usize, const FLIP_SIGN: bool>(
     }
 }
 
-fn l2_local_3shell_sort(slice_bucket: &mut [i32], scratch_bucket: &mut [i32]) {
+pub fn l2_local_3shell_sort(slice_bucket: &mut [i32], scratch_bucket: &mut [i32]) {
     let len = slice_bucket.len();
     if len <= SMALL_SORT_CUTOFF {
         if len > 1 {
