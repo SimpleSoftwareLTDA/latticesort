@@ -6,6 +6,7 @@
 const BARYCENTRIC_HORIZON_MAX: u64 = 1_048_576;
 const SMALL_SORT_CUTOFF: usize = 96;
 const STACK_SCRATCH_MAX: usize = 2048;
+const MSB_L2_PARTITION_THRESHOLD: usize = 1_500_000;
 
 const CRYSTAL_MULTS: [u32; 4] = [
     0x9E37_79B9,
@@ -437,10 +438,139 @@ fn scatter_pass<const SHIFT: usize, const FLIP_SIGN: bool>(
     }
 }
 
+fn l2_local_3shell_sort(slice_bucket: &mut [i32], scratch_bucket: &mut [i32]) {
+    let len = slice_bucket.len();
+    if len <= SMALL_SORT_CUTOFF {
+        if len > 1 {
+            in_place_small_sort(slice_bucket);
+        }
+        return;
+    }
+
+    // Data starts in `scratch_bucket` (placed there by the top-level MSB scatter)
+    let mut h0 = [0_u32; 256];
+    let mut h1 = [0_u32; 256];
+    let mut h2 = [0_u32; 256];
+
+    let (chunks, rem) = scratch_bucket.as_chunks::<4>();
+    for c in chunks {
+        let u0 = c[0] as u32;
+        let u1 = c[1] as u32;
+        let u2 = c[2] as u32;
+        let u3 = c[3] as u32;
+
+        h0[(u0 & 0xFF) as usize] += 1;
+        h1[((u0 >> 8) & 0xFF) as usize] += 1;
+        h2[((u0 >> 16) & 0xFF) as usize] += 1;
+
+        h0[(u1 & 0xFF) as usize] += 1;
+        h1[((u1 >> 8) & 0xFF) as usize] += 1;
+        h2[((u1 >> 16) & 0xFF) as usize] += 1;
+
+        h0[(u2 & 0xFF) as usize] += 1;
+        h1[((u2 >> 8) & 0xFF) as usize] += 1;
+        h2[((u2 >> 16) & 0xFF) as usize] += 1;
+
+        h0[(u3 & 0xFF) as usize] += 1;
+        h1[((u3 >> 8) & 0xFF) as usize] += 1;
+        h2[((u3 >> 16) & 0xFF) as usize] += 1;
+    }
+    for &x in rem {
+        let u = x as u32;
+        h0[(u & 0xFF) as usize] += 1;
+        h1[((u >> 8) & 0xFF) as usize] += 1;
+        h2[((u >> 16) & 0xFF) as usize] += 1;
+    }
+
+    let n32 = len as u32;
+    let mut in_scratch = true;
+
+    if !h0.contains(&n32) {
+        scatter_pass::<0, false>(scratch_bucket, slice_bucket, &h0);
+        in_scratch = false;
+    }
+    if !h1.contains(&n32) {
+        if in_scratch {
+            scatter_pass::<8, false>(scratch_bucket, slice_bucket, &h1);
+            in_scratch = false;
+        } else {
+            scatter_pass::<8, false>(slice_bucket, scratch_bucket, &h1);
+            in_scratch = true;
+        }
+    }
+    if !h2.contains(&n32) {
+        if in_scratch {
+            scatter_pass::<16, false>(scratch_bucket, slice_bucket, &h2);
+            in_scratch = false;
+        } else {
+            scatter_pass::<16, false>(slice_bucket, scratch_bucket, &h2);
+            in_scratch = true;
+        }
+    }
+
+    if in_scratch {
+        slice_bucket.copy_from_slice(scratch_bucket);
+    }
+}
+
+fn msb_l2_spectral_sort(slice: &mut [i32]) {
+    let len = slice.len();
+    let mut h3 = [0_u32; 256];
+    let (chunks, rem) = slice.as_chunks::<4>();
+    for c in chunks {
+        h3[(((c[0] as u32) >> 24) ^ 0x80) as usize] += 1;
+        h3[(((c[1] as u32) >> 24) ^ 0x80) as usize] += 1;
+        h3[(((c[2] as u32) >> 24) ^ 0x80) as usize] += 1;
+        h3[(((c[3] as u32) >> 24) ^ 0x80) as usize] += 1;
+    }
+    for &x in rem {
+        h3[(((x as u32) >> 24) ^ 0x80) as usize] += 1;
+    }
+
+    let mut scratch = vec![0_i32; len];
+    let n32 = len as u32;
+    if h3.contains(&n32) {
+        // Top byte is degenerate (all elements share the same top byte): sort lower 3 shells directly
+        scratch.copy_from_slice(slice);
+        l2_local_3shell_sort(slice, &mut scratch);
+        return;
+    }
+
+    let mut bucket_starts = [0_usize; 256];
+    let mut sum = 0_usize;
+    for (i, &c) in h3.iter().enumerate() {
+        bucket_starts[i] = sum;
+        sum += c as usize;
+    }
+
+    scatter_pass::<24, true>(slice, &mut scratch, &h3);
+
+    for b in 0..256 {
+        let count = h3[b] as usize;
+        if count == 0 {
+            continue;
+        }
+        let start = bucket_starts[b];
+        let end = start + count;
+        if count == 1 {
+            slice[start] = scratch[start];
+        } else if count <= SMALL_SORT_CUTOFF {
+            slice[start..end].copy_from_slice(&scratch[start..end]);
+            in_place_small_sort(&mut slice[start..end]);
+        } else {
+            l2_local_3shell_sort(&mut slice[start..end], &mut scratch[start..end]);
+        }
+    }
+}
+
 fn spectral_tetra_shell_sort(slice: &mut [i32]) {
     let len = slice.len();
     if len <= SMALL_SORT_CUTOFF {
         in_place_small_sort(slice);
+        return;
+    }
+    if len >= MSB_L2_PARTITION_THRESHOLD {
+        msb_l2_spectral_sort(slice);
         return;
     }
 
