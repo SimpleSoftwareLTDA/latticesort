@@ -1,4 +1,4 @@
-use metatron_sort_rs::{SacredSort, candidate, sacred_sort_par};
+use latticesort::{LatticeSort, candidate, par_lattice_sort};
 use std::time::Instant;
 
 fn median_ms<T: Clone, F: FnMut(&mut [T])>(base: &[T], mut sort_fn: F, trials: usize) -> (f64, Vec<T>) {
@@ -16,10 +16,10 @@ fn median_ms<T: Clone, F: FnMut(&mut [T])>(base: &[T], mut sort_fn: F, trials: u
 
 fn main() {
     let n = 1_000_000;
-    println!("=== ETAPA 3: GENERALIZACAO DE TIPOS (SacredSort Trait, N = {n}) ===");
+    println!("=== ETAPA 3: GENERALIZACAO DE TIPOS (LatticeSort Trait, N = {n}) ===");
     println!(
         "{:<34} | {:>12} | {:>12} | {:>9} | {:>6}",
-        "Tipo e Distribuicao", "Sacred (ms)", "Std (ms)", "Speedup", "OK"
+        "Tipo e Distribuicao", "Lattice (ms)", "Std (ms)", "Speedup", "OK"
     );
     println!("{}", "-".repeat(83));
 
@@ -33,19 +33,19 @@ fn main() {
             })
             .collect();
         let (std_ms, exp) = median_ms(&data, <[u32]>::sort_unstable, 3);
-        let (sac_ms, act) = median_ms(&data, <[u32]>::sacred_sort, 3);
+        let (lat_ms, act) = median_ms(&data, <[u32]>::lattice_sort, 3);
         println!(
             "{:<34} | {:>12.2} | {:>12.2} | {:>8.2}x | {:>6}",
             "1. u32 (Uniform 32-bit)",
-            sac_ms,
+            lat_ms,
             std_ms,
-            std_ms / sac_ms,
+            std_ms / lat_ms,
             act == exp
         );
         assert_eq!(act, exp);
     }
 
-    // 2. i64 Realistic Timestamps (upper 4 bytes constant -> 4 of 8 shells skipped!)
+    // 2. i64 Realistic Timestamps (upper 4 bytes constant -> 4 of 8 bytes skipped!)
     {
         let mut seed = 987_654_321_u64;
         let base_ts: i64 = 1_760_000_000_000;
@@ -56,13 +56,13 @@ fn main() {
             })
             .collect();
         let (std_ms, exp) = median_ms(&data, <[i64]>::sort_unstable, 3);
-        let (sac_ms, act) = median_ms(&data, <[i64]>::sacred_sort, 3);
+        let (lat_ms, act) = median_ms(&data, <[i64]>::lattice_sort, 3);
         println!(
             "{:<34} | {:>12.2} | {:>12.2} | {:>8.2}x | {:>6}",
-            "2. i64 (Timestamps: 4 shells skip)",
-            sac_ms,
+            "2. i64 (Timestamps: 4 bytes skip)",
+            lat_ms,
             std_ms,
-            std_ms / sac_ms,
+            std_ms / lat_ms,
             act == exp
         );
         assert_eq!(act, exp);
@@ -78,13 +78,13 @@ fn main() {
             })
             .collect();
         let (std_ms, exp) = median_ms(&data, <[i64]>::sort_unstable, 3);
-        let (sac_ms, act) = median_ms(&data, <[i64]>::sacred_sort, 3);
+        let (lat_ms, act) = median_ms(&data, <[i64]>::lattice_sort, 3);
         println!(
             "{:<34} | {:>12.2} | {:>12.2} | {:>8.2}x | {:>6}",
             "3. i64 (K=50 IDs 64-bit)",
-            sac_ms,
+            lat_ms,
             std_ms,
-            std_ms / sac_ms,
+            std_ms / lat_ms,
             act == exp
         );
         assert_eq!(act, exp);
@@ -100,13 +100,13 @@ fn main() {
             })
             .collect();
         let (std_ms, exp) = median_ms(&data, <[u64]>::sort_unstable, 3);
-        let (sac_ms, act) = median_ms(&data, <[u64]>::sacred_sort, 3);
+        let (lat_ms, act) = median_ms(&data, <[u64]>::lattice_sort, 3);
         println!(
             "{:<34} | {:>12.2} | {:>12.2} | {:>8.2}x | {:>6}",
             "4. u64 (IDs 32-bit em u64)",
-            sac_ms,
+            lat_ms,
             std_ms,
-            std_ms / sac_ms,
+            std_ms / lat_ms,
             act == exp
         );
         assert_eq!(act, exp);
@@ -122,14 +122,14 @@ fn main() {
             })
             .collect();
         let (std_ms, exp) = median_ms(&data, |s| s.sort_unstable_by(f32::total_cmp), 3);
-        let (sac_ms, act) = median_ms(&data, <[f32]>::sacred_sort, 3);
+        let (lat_ms, act) = median_ms(&data, <[f32]>::lattice_sort, 3);
         let eq = act.iter().zip(exp.iter()).all(|(a, b)| a.to_bits() == b.to_bits());
         println!(
             "{:<34} | {:>12.2} | {:>12.2} | {:>8.2}x | {:>6}",
             "5. f32 (Ponto Flutuante +/-)",
-            sac_ms,
+            lat_ms,
             std_ms,
-            std_ms / sac_ms,
+            std_ms / lat_ms,
             eq
         );
         assert!(eq);
@@ -145,20 +145,20 @@ fn main() {
             })
             .collect();
         let (std_ms, exp) = median_ms(&data, |s| s.sort_unstable_by(f64::total_cmp), 3);
-        let (sac_ms, act) = median_ms(&data, <[f64]>::sacred_sort, 3);
+        let (lat_ms, act) = median_ms(&data, <[f64]>::lattice_sort, 3);
         let eq = act.iter().zip(exp.iter()).all(|(a, b)| a.to_bits() == b.to_bits());
         println!(
             "{:<34} | {:>12.2} | {:>12.2} | {:>8.2}x | {:>6}",
             "6. f64 (Sensores K=64 +/-)",
-            sac_ms,
+            lat_ms,
             std_ms,
-            std_ms / sac_ms,
+            std_ms / lat_ms,
             eq
         );
         assert!(eq);
     }
 
-    println!("\n=== ETAPA 4: EXECUCAO PARALELA MULTI-CORE (sacred_sort_par) ===");
+    println!("\n=== ETAPA 4: EXECUCAO PARALELA MULTI-CORE (par_lattice_sort) ===");
     println!(
         "{:<34} | {:>12} | {:>12} | {:>12} | {:>10}",
         "Cenario Uniform 32-bit", "Par (ms)", "1-Thr (ms)", "Std (ms)", "Par vs Std"
@@ -177,8 +177,8 @@ fn main() {
             })
             .collect();
         let (std_ms, exp) = median_ms(&data, <[i32]>::sort_unstable, 3);
-        let (seq_ms, seq_act) = median_ms(&data, candidate::candidate_sort, 3);
-        let (par_ms, par_act) = median_ms(&data, sacred_sort_par, 3);
+        let (seq_ms, seq_act) = median_ms(&data, candidate::lattice_sort_i32, 3);
+        let (par_ms, par_act) = median_ms(&data, par_lattice_sort, 3);
         assert_eq!(seq_act, exp);
         assert_eq!(par_act, exp);
         println!(

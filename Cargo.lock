@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "metatron-sort-rs"
+name = "latticesort"
 version = "0.1.0"

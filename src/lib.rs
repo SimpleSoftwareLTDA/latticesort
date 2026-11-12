@@ -1,40 +1,38 @@
 pub mod candidate;
 pub mod harness;
 
-/// Generalized Sacred-Natural Sorting Trait for primitive integers and IEEE-754 floats.
-pub trait SacredSort {
-    fn sacred_sort(&mut self);
+use std::num::NonZeroUsize;
+use std::thread;
+
+/// Adaptive multi-stage sorting trait (`LatticeSort`) for primitive integers and IEEE-754 floats.
+pub trait LatticeSort {
+    fn lattice_sort(&mut self);
 }
 
-impl SacredSort for [i32] {
-    fn sacred_sort(&mut self) {
-        candidate::candidate_sort(self);
+impl LatticeSort for [i32] {
+    fn lattice_sort(&mut self) {
+        candidate::lattice_sort_i32(self);
     }
 }
 
-impl SacredSort for [u32] {
-    fn sacred_sort(&mut self) {
+impl LatticeSort for [u32] {
+    fn lattice_sort(&mut self) {
         if self.len() <= 1 {
             return;
         }
-        // Bijective order-preserving map u32 -> i32 via sign-bit flip
-        for x in self.iter_mut() {
-            *x ^= 0x8000_0000;
-        }
-        let mut buf: Vec<i32> = self.iter().map(|&u| u as i32).collect();
-        candidate::candidate_sort(&mut buf);
+        let mut buf: Vec<i32> = self.iter().map(|&u| (u ^ 0x8000_0000) as i32).collect();
+        candidate::lattice_sort_i32(&mut buf);
         for (dst, &src) in self.iter_mut().zip(buf.iter()) {
             *dst = (src as u32) ^ 0x8000_0000;
         }
     }
 }
 
-impl SacredSort for [f32] {
-    fn sacred_sort(&mut self) {
+impl LatticeSort for [f32] {
+    fn lattice_sort(&mut self) {
         if self.len() <= 1 {
             return;
         }
-        // IEEE-754 total_cmp bijection onto signed i32
         let mut mapped: Vec<i32> = self
             .iter()
             .map(|&f| {
@@ -43,7 +41,7 @@ impl SacredSort for [f32] {
                 (bits ^ mask) as i32
             })
             .collect();
-        candidate::candidate_sort(&mut mapped);
+        candidate::lattice_sort_i32(&mut mapped);
         for (dst, &m) in self.iter_mut().zip(mapped.iter()) {
             let bits = m as u32;
             let mask = ((m >> 31) as u32) & 0x7FFF_FFFF;
@@ -52,14 +50,14 @@ impl SacredSort for [f32] {
     }
 }
 
-impl SacredSort for [i64] {
-    fn sacred_sort(&mut self) {
-        sort_i64_slice(self);
+impl LatticeSort for [i64] {
+    fn lattice_sort(&mut self) {
+        lattice_sort_i64(self);
     }
 }
 
-impl SacredSort for [u64] {
-    fn sacred_sort(&mut self) {
+impl LatticeSort for [u64] {
+    fn lattice_sort(&mut self) {
         if self.len() <= 1 {
             return;
         }
@@ -67,15 +65,15 @@ impl SacredSort for [u64] {
             .iter()
             .map(|&u| (u ^ 0x8000_0000_0000_0000) as i64)
             .collect();
-        sort_i64_slice(&mut mapped);
+        lattice_sort_i64(&mut mapped);
         for (dst, &m) in self.iter_mut().zip(mapped.iter()) {
             *dst = (m as u64) ^ 0x8000_0000_0000_0000;
         }
     }
 }
 
-impl SacredSort for [f64] {
-    fn sacred_sort(&mut self) {
+impl LatticeSort for [f64] {
+    fn lattice_sort(&mut self) {
         if self.len() <= 1 {
             return;
         }
@@ -87,7 +85,7 @@ impl SacredSort for [f64] {
                 (bits ^ mask) as i64
             })
             .collect();
-        sort_i64_slice(&mut mapped);
+        lattice_sort_i64(&mut mapped);
         for (dst, &m) in self.iter_mut().zip(mapped.iter()) {
             let bits = m as u64;
             let mask = ((m >> 63) as u64) & 0x7FFF_FFFF_FFFF_FFFF;
@@ -96,7 +94,7 @@ impl SacredSort for [f64] {
     }
 }
 
-const CRYSTAL_MULTS_64: [u64; 4] = [
+const SENTINEL_HASH_MULTS_64: [u64; 4] = [
     0x9E37_79B9_7F4A_7C15,
     0xBF58_476D_1CE4_E5B9,
     0x94D0_49BB_1331_11EB,
@@ -116,12 +114,12 @@ fn insertion_sort_i64(slice: &mut [i64]) {
 }
 
 #[inline]
-fn crystal_hash_64(val: i64, mult: u64) -> usize {
+fn sentinel_hash_64(val: i64, mult: u64) -> usize {
     let u = val as u64;
     (((u ^ (u >> 30)).wrapping_mul(mult)) >> 54) as usize
 }
 
-fn try_nucleation_i64(slice: &mut [i64]) -> bool {
+fn try_sentinel_hash_aggregation_i64(slice: &mut [i64]) -> bool {
     let len = slice.len();
     if len <= 2048 {
         return false;
@@ -154,12 +152,12 @@ fn try_nucleation_i64(slice: &mut [i64]) -> bool {
         }
     }
 
-    let mut chosen_mult = CRYSTAL_MULTS_64[0];
-    for &m in &CRYSTAL_MULTS_64 {
+    let mut chosen_mult = SENTINEL_HASH_MULTS_64[0];
+    for &m in &SENTINEL_HASH_MULTS_64 {
         let mut occupied = [false; 1024];
         let mut ok = true;
         for &k in &unique_probe[..u_len] {
-            let s = crystal_hash_64(k, m);
+            let s = sentinel_hash_64(k, m);
             if occupied[s] {
                 ok = false;
                 break;
@@ -173,9 +171,9 @@ fn try_nucleation_i64(slice: &mut [i64]) -> bool {
     }
 
     let d0 = 0_i64;
-    let s0 = crystal_hash_64(d0, chosen_mult);
+    let s0 = sentinel_hash_64(d0, chosen_mult);
     let mut d1 = 1_i64;
-    while crystal_hash_64(d1, chosen_mult) == s0 {
+    while sentinel_hash_64(d1, chosen_mult) == s0 {
         d1 += 1;
     }
 
@@ -186,7 +184,7 @@ fn try_nucleation_i64(slice: &mut [i64]) -> bool {
     let mut unique_count = 0_usize;
 
     for &k in &unique_probe[..u_len] {
-        let s = crystal_hash_64(k, chosen_mult);
+        let s = sentinel_hash_64(k, chosen_mult);
         if !used[s] {
             used[s] = true;
             keys[s] = k;
@@ -195,7 +193,7 @@ fn try_nucleation_i64(slice: &mut [i64]) -> bool {
     }
 
     for &val in slice.iter() {
-        let s = crystal_hash_64(val, chosen_mult);
+        let s = sentinel_hash_64(val, chosen_mult);
         if keys[s] == val {
             counts[s] += 1;
         } else {
@@ -220,27 +218,27 @@ fn try_nucleation_i64(slice: &mut [i64]) -> bool {
         }
     }
 
-    let mut nuclei = [(0_i64, 0_usize); 384];
+    let mut entries = [(0_i64, 0_usize); 384];
     let mut n_idx = 0_usize;
     for s in 0..1024 {
         if used[s] && counts[s] > 0 {
-            nuclei[n_idx] = (keys[s], counts[s] as usize);
+            entries[n_idx] = (keys[s], counts[s] as usize);
             n_idx += 1;
         }
     }
 
     for i in 1..n_idx {
-        let key = nuclei[i];
+        let key = entries[i];
         let mut j = i;
-        while j > 0 && nuclei[j - 1].0 > key.0 {
-            nuclei[j] = nuclei[j - 1];
+        while j > 0 && entries[j - 1].0 > key.0 {
+            entries[j] = entries[j - 1];
             j -= 1;
         }
-        nuclei[j] = key;
+        entries[j] = key;
     }
 
     let mut offset = 0_usize;
-    for &(val, count) in &nuclei[..n_idx] {
+    for &(val, count) in &entries[..n_idx] {
         slice[offset..offset + count].fill(val);
         offset += count;
     }
@@ -268,9 +266,8 @@ fn scatter_pass_i64(src: &[i64], dst: &mut [i64], hist: &[u32; 256], shift: usiz
     }
 }
 
-/// 64-bit Octa-Shell Spectral Sort with Fused 8x256 Histogram and Degenerate Shell Skipping.
-/// Real-world 64-bit integers (timestamps, IDs, bounded values) automatically skip constant upper shells!
-pub fn sort_i64_slice(slice: &mut [i64]) {
+/// 64-bit 8-pass LSD Radix Sort with Fused 8x256 Histogram and Degenerate Byte Skipping.
+pub fn lattice_sort_i64(slice: &mut [i64]) {
     let len = slice.len();
     if len <= 128 {
         if len > 1 {
@@ -279,7 +276,7 @@ pub fn sort_i64_slice(slice: &mut [i64]) {
         return;
     }
 
-    if try_nucleation_i64(slice) {
+    if try_sentinel_hash_aggregation_i64(slice) {
         return;
     }
 
@@ -320,16 +317,13 @@ pub fn sort_i64_slice(slice: &mut [i64]) {
     }
 }
 
-use std::num::NonZeroUsize;
-use std::thread;
-
-/// Multi-Core Parallel Sacred-Natural Sort (Front 4).
+/// Multi-Core Parallel LatticeSort (`par_lattice_sort`).
 /// Uses `std::thread::scope` with disjoint mutable bucket slices (`split_at_mut`),
 /// requiring zero `unsafe` blocks and zero external dependencies.
-pub fn sacred_sort_par(slice: &mut [i32]) {
+pub fn par_lattice_sort(slice: &mut [i32]) {
     let len = slice.len();
     if len < 200_000 {
-        candidate::candidate_sort(slice);
+        candidate::lattice_sort_i32(slice);
         return;
     }
 
@@ -338,22 +332,21 @@ pub fn sacred_sort_par(slice: &mut [i32]) {
         .unwrap_or(4)
         .min(16);
     if threads <= 1 {
-        candidate::candidate_sort(slice);
+        candidate::lattice_sort_i32(slice);
         return;
     }
 
-    if candidate::try_soliton_wave_collapse(slice) {
+    if candidate::try_bitonic_run_merge(slice) {
         return;
     }
-    let (nucleated, span_exceeds_horizon) = candidate::try_phyllotaxis_nucleation(slice);
-    if nucleated {
+    let (aggregated, span_exceeds_horizon) = candidate::try_sentinel_hash_aggregation(slice);
+    if aggregated {
         return;
     }
-    if !span_exceeds_horizon && candidate::try_barycentric_condensation(slice) {
+    if !span_exceeds_horizon && candidate::try_dense_range_count(slice) {
         return;
     }
 
-    // Step 1: Parallel MSB Histogram across `threads` chunks
     let chunk_size = len.div_ceil(threads);
     let mut local_hists = vec![[0_u32; 256]; threads];
     thread::scope(|s| {
@@ -384,14 +377,12 @@ pub fn sacred_sort_par(slice: &mut [i32]) {
     let n32 = len as u32;
     if h3.contains(&n32) {
         scratch.copy_from_slice(slice);
-        candidate::l2_local_3shell_sort(slice, &mut scratch);
+        candidate::l2_local_3pass_radix_sort(slice, &mut scratch);
         return;
     }
 
-    // Step 2: Top-level MSB scatter into `scratch`
     candidate::scatter_pass::<24, true>(slice, &mut scratch, &h3);
 
-    // Step 3: Split `slice` and `scratch` into disjoint mutable bucket pairs via safe `split_at_mut`
     let mut buckets: Vec<(&mut [i32], &mut [i32])> = Vec::with_capacity(256);
     let mut rem_slice = &mut slice[..];
     let mut rem_scratch = &mut scratch[..];
@@ -407,7 +398,6 @@ pub fn sacred_sort_par(slice: &mut [i32]) {
         buckets.push((s_head, sc_head));
     }
 
-    // Step 4: Partition the bucket list into balanced thread groups and sort in parallel in L2 cache
     let target_per_thread = len.div_ceil(threads);
     thread::scope(|s| {
         let mut rem_buckets = &mut buckets[..];
@@ -429,10 +419,58 @@ pub fn sacred_sort_par(slice: &mut [i32]) {
                     if count == 1 {
                         s_bucket[0] = sc_bucket[0];
                     } else {
-                        candidate::l2_local_3shell_sort(s_bucket, sc_bucket);
+                        candidate::l2_local_3pass_radix_sort(s_bucket, sc_bucket);
                     }
                 }
             });
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LatticeSort, par_lattice_sort};
+
+    #[test]
+    fn test_generic_lattice_sort_all_types() {
+        let mut v_u32 = vec![400_000_000_u32, 0, u32::MAX, 42, 7, 7];
+        let mut exp_u32 = v_u32.clone();
+        exp_u32.sort_unstable();
+        v_u32.lattice_sort();
+        assert_eq!(v_u32, exp_u32);
+
+        let mut v_i64 = vec![i64::MAX, i64::MIN, 0, -42, 42, -1];
+        let mut exp_i64 = v_i64.clone();
+        exp_i64.sort_unstable();
+        v_i64.lattice_sort();
+        assert_eq!(v_i64, exp_i64);
+
+        let mut v_u64 = vec![u64::MAX, 0, 123_456_789_012_345, 42, 42];
+        let mut exp_u64 = v_u64.clone();
+        exp_u64.sort_unstable();
+        v_u64.lattice_sort();
+        assert_eq!(v_u64, exp_u64);
+
+        let mut v_f32 = vec![3.5_f32, -0.0, 0.0, -100.25, f32::INFINITY, f32::NEG_INFINITY];
+        let mut exp_f32 = v_f32.clone();
+        exp_f32.sort_unstable_by(f32::total_cmp);
+        v_f32.lattice_sort();
+        for (a, b) in v_f32.iter().zip(exp_f32.iter()) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+
+        let mut v_f64 = vec![1.25_f64, -0.0, 0.0, -9999.5, f64::INFINITY, f64::NEG_INFINITY];
+        let mut exp_f64 = v_f64.clone();
+        exp_f64.sort_unstable_by(f64::total_cmp);
+        v_f64.lattice_sort();
+        for (a, b) in v_f64.iter().zip(exp_f64.iter()) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+
+        let mut v_par: Vec<i32> = (0..250_000).rev().collect();
+        let mut exp_par = v_par.clone();
+        exp_par.sort_unstable();
+        par_lattice_sort(&mut v_par);
+        assert_eq!(v_par, exp_par);
+    }
 }
