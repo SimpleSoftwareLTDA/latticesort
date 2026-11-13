@@ -1,6 +1,6 @@
 # `latticesort`
 
-`latticesort` is a zero-dependency, 100% safe Rust sorting library for primitive integers (`i32`, `u32`, `i64`, `u64`) and floating-point slices (`f32`, `f64`). Developed through an autonomous experimental research campaign (`autoresearch`) and hardened against an adversarial red-team suite, `latticesort` achieves a **4.98x to 5.68x geometric mean speedup** at $N = 1{,}000{,}000$ and a **4.02x geometric mean speedup** at $N = 10{,}000{,}000$ over Rust's standard library `std::slice::sort_unstable` (`ipnsort` / pattern-defeating quicksort).
+`latticesort` is a zero-dependency, 100% safe Rust sorting library for primitive integers (`i32`, `u32`, `i64`, `u64`) and floating-point slices (`f32`, `f64`). Developed through an autonomous experimental research campaign (`autoresearch`) and hardened against an adversarial red-team suite, `latticesort` achieves a **4.79x to 5.68x geometric mean speedup** at $N = 1{,}000{,}000$, a **4.02x to 4.08x geometric mean speedup** at $N = 10{,}000{,}000$, and up to **7.68x speedup** at $N = 1{,}000{,}000{,}000$ ($4.00\text{ GB}$) over Rust's standard library `std::slice::sort_unstable` (`ipnsort` / pattern-defeating quicksort).
 
 ---
 
@@ -145,7 +145,11 @@ This maps $[-\infty, -0.0, +0.0, +\infty]$ monotonically onto the signed integer
 
 ## Performance Benchmarks vs Literature Sorting Algorithms
 
-All benchmarks were compiled with `rustc 1.100.0` (`-C opt-level=3`, Link-Time Optimization enabled, `codegen-units = 1`) and verified bit-for-bit against `std::slice::sort_unstable`.
+### Benchmark Environment and Methodology
+* **Hardware**: `13th Gen Intel(R) Core(TM) i7-1360P` (12 physical cores / 16 logical threads: 4 Performance-cores + 8 Efficiency-cores), with dynamic Turbo Boost enabled.
+* **Cache Hierarchy**: L1d `48 KiB` per P-core (`32 KiB` per E-core), L2 `1.25 MiB` per P-core (`9 MiB` total across 6 instances), L3 `18 MiB` shared.
+* **System & Compiler**: Linux x86_64, `rustc` (Edition 2024), `-C opt-level=3`, Link-Time Optimization (`lto = true`), `codegen-units = 1`.
+* **Measurement Protocol & Thermal Variance**: Each benchmark computes the median latency across runs per distribution and verifies every output slice element-for-element against `std::slice::sort_unstable`. Across isolated binary runs (`latticesort`, `4.79x` to `4.99x` post Red-Team immunization in `exp13`..`exp19`) and sustained multi-algorithm sweeps (`bench_literature`, `5.68x`), the observed single-core geometric mean at $N = 1{,}000{,}000$ ranges between **4.79x and 5.68x** (`1.06 ms` to `1.15 ms` vs `5.22 ms` to `6.04 ms`) depending on P-core Turbo Boost residency.
 
 ### 1. Comparison Against 6 Sorting Algorithms from Computer Science Literature ($N = 1{,}000{,}000$)
 
