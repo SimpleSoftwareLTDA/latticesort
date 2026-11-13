@@ -2,6 +2,11 @@
 name = "latticesort"
 version = "0.1.0"
 edition = "2024"
+description = "Adaptive structural, hash-aggregated, and hybrid radix sorting library for primitive integers and floating-point slices in safe Rust."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/SimpleSoftwareLTDA/latticesort"
+keywords = ["sort", "radix-sort", "sorting", "algorithms", "performance"]
+categories = ["algorithms", "data-structures"]
 
 [profile.release]
 opt-level = 3
