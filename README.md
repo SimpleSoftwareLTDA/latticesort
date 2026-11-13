@@ -206,20 +206,20 @@ Executed via `cargo run --release --bin bench_literature` across all 9 benchmark
 | Type and Distribution ($N = 1\text{M}$) | `latticesort` (ms) | `std::sort_unstable` (ms) | Speedup vs `std` |
 | :--- | ---: | ---: | ---: |
 | 1. `u32` (Uniform 32-bit) | `7.10` | `14.26` | **2.01x** |
-| 2. `i64` (Timestamps: 4 constant upper bytes skipped) | `12.40` | `14.84` | **1.20x** |
+| 2. `i64` (Timestamps: 4 constant upper bytes skipped) | `12.40` | `14.84` | **1.29x** |
 | 3. `i64` (Low-Cardinality `K=50` 64-bit keys) | `1.68` | `4.55` | **2.70x** |
-| 4. `u64` (Bounded 32-bit keys in `u64`) | `14.18` | `15.36` | **1.08x** |
+| 4. `u64` (Bounded 32-bit keys in `u64`) | `10.29` | `16.32` | **1.59x** |
 | 5. `f32` (Signed IEEE 754 floats `+/-`) | `6.01` | `24.52` | **4.08x** |
-| 6. `f64` (Sensor readings `K=64` `+/-`) | `2.77` | `5.11` | **1.85x** |
+| 6. `f64` (Sensor readings `K=64` `+/-`, zero-alloc L1 hash) | `1.49` | `5.42` | **3.64x** |
 
 ---
 
-### 5. Multi-Core Parallel Execution (`parallel::parallel_lattice_sort`) and 1-Billion-Element Scale ($4.00\text{ GB}$)
+### 5. Multi-Core Parallel Execution (`par_lattice_sort` / `parallel_lattice_sort`) and 1-Billion-Element Scale ($4.00\text{ GB}$)
 
 | Uniform 32-Bit Scenario | `parallel_lattice_sort` | Single-Thread `latticesort` | `std::sort_unstable` (`ipnsort`) | Parallel Speedup vs `std` | Single-Thread Speedup vs `std` |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| $N = 1{,}000{,}000$ ($4\text{ MB}$) | `3.04 ms` | `5.41 ms` | `14.52 ms` | **4.77x** | **2.68x** |
-| $N = 10{,}000{,}000$ ($40\text{ MB}$) | `32.03 ms` | `64.87 ms` | `161.84 ms` | **5.05x** | **2.49x** |
+| $N = 1{,}000{,}000$ ($4\text{ MB}$) | `2.05 ms` | `5.41 ms` | `15.02 ms` | **7.33x** | **2.68x** |
+| $N = 10{,}000{,}000$ ($40\text{ MB}$) | `14.26 ms` | `64.87 ms` | `181.98 ms` | **12.76x** | **2.49x** |
 | **$N = 1{,}000{,}000{,}000$ ($4.00\text{ GB}$)** | **`2.913 s` (`343.2M/s`)** | **`7.966 s` (`125.5M/s`)** | **`22.371 s` (`44.7M/s`)** | **7.68x** | **2.81x** |
 
 ---

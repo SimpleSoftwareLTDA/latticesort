@@ -235,4 +235,17 @@ fn test_polymorphic_types_and_ieee754_edge_cases() {
     for (a, b) in f64_data.iter().zip(f64_expected.iter()) {
         assert_eq!(a.to_bits(), b.to_bits());
     }
+
+    // 64-bit bitonic soliton wave + dense range count + par_lattice_sort
+    let mut i64_soliton: Vec<i64> = (0..5_000_i64).chain((0..5_000_i64).rev()).collect();
+    let mut i64_soliton_expected = i64_soliton.clone();
+    i64_soliton_expected.sort_unstable();
+    i64_soliton.lattice_sort();
+    assert_eq!(i64_soliton, i64_soliton_expected);
+
+    let mut u64_par: Vec<u64> = (0..220_000).map(|_| rng.next_u64()).collect();
+    let mut u64_par_expected = u64_par.clone();
+    u64_par_expected.sort_unstable();
+    u64_par.par_lattice_sort();
+    assert_eq!(u64_par, u64_par_expected);
 }

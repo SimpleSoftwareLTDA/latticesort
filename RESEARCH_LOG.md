@@ -85,3 +85,4 @@ Para evitar distorções de interpretação entre medições históricas, todas 
 | `exp17` | Front 4: `parallel_lattice_sort` ($10^7$) | Histograma MSB paralelo + 256 blocos L2 | 35.430 | 186.910 | 5.28x | KEEP |
 | `exp18` | Front 5: 1-Billion 2-Level Cascade ($10^9$) | Sub-baldes de 61 KB no Byte 2 (`4 GB`) | 2913.000 | 22371.000 | **7.68x** | **KEEP** |
 | `exp19` | Front 6: Small-Slice Crossover (`384`) | Cruzamento L1 ($1024+5N$ vs $N\log_2 N$) | **1.119** | **5.589** | **4.99x** | **KEEP** |
+| `exp20` | Front 7: Zero-Buffer Bijective Generics | `LatticeKey32`/`LatticeKey64` sem `mapped` + 4 estágios 64-bit + `par_lattice_sort` | **1.490** | **5.420** | **3.64x** | **KEEP** |

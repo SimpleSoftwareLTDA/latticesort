@@ -1,8 +1,17 @@
-//! 64-bit adaptive sorting kernel (`lattice_sort_i64`).
+//! 64-bit adaptive sorting kernel (`lattice_sort_i64` and `lattice_sort_generic_64`).
 //!
-//! Combines a 1024-slot dual-sentinel L1 hash table for low-cardinality 64-bit keys with
-//! an 8-pass 8-bit LSD radix sort that computes all eight byte histograms in a single pass
-//! and skips constant (zero-entropy) bytes.
+//! Combines all four adaptive stages for 64-bit bijective types (`i64`, `u64`, `f64`):
+//! 1. `try_bitonic_run_merge_64`: linear-time $O(n)$ run detection and merge.
+//! 2. `try_sentinel_hash_aggregation_64`: 1024-slot dual-sentinel L1 hash table ($K \le 384$).
+//! 3. `try_dense_range_count_64`: cache-bounded offset counting sort when $E_{\max} - E_{\min}$ fits in cache.
+//! 4. 8-pass 8-bit LSD radix sort with 4x unrolled single-pass histograms, stack buffer for
+//!    $N \le 1024$, and compile-time `const SHIFT` / `const FLIP_SIGN` scatter passes.
+
+use crate::candidate::HashAggregationOutcome;
+
+const DENSE_RANGE_MAX_SPAN_64: u128 = 1_048_576;
+pub(crate) const SMALL_SORT_CUTOFF_64: usize = 384;
+const STACK_SCRATCH_MAX_64: usize = 1024;
 
 const SENTINEL_HASH_MULTIPLIERS_64: [u64; 4] = [
     0x9e37_79b9_7f4a_7c15,
@@ -11,16 +20,86 @@ const SENTINEL_HASH_MULTIPLIERS_64: [u64; 4] = [
     0xd6e8_feb8_6659_fd93,
 ];
 
+/// Bijective 64-bit key mapping onto the signed `i64` total-order lattice.
+pub trait LatticeKey64: Copy + Send + Sync {
+    /// Zero-initialized default value used for scratch buffers.
+    const ZERO: Self;
+
+    /// Projects `self` onto `i64` preserving total order ($a \le b \iff \text{to\_key}(a) \le \text{to\_key}(b)$).
+    fn to_key(self) -> i64;
+
+    /// Inverse bijection reconstructing `Self` from its `i64` lattice key.
+    fn from_key(key: i64) -> Self;
+
+    /// Sorts a small slice ($\le 384$ elements) in-place without heap allocation.
+    fn sort_small_in_place(slice: &mut [Self]);
+}
+
+impl LatticeKey64 for i64 {
+    const ZERO: Self = 0;
+
+    #[inline(always)]
+    fn to_key(self) -> i64 {
+        self
+    }
+
+    #[inline(always)]
+    fn from_key(key: i64) -> Self {
+        key
+    }
+
+    #[inline]
+    fn sort_small_in_place(slice: &mut [Self]) {
+        slice.sort_unstable();
+    }
+}
+
+impl LatticeKey64 for u64 {
+    const ZERO: Self = 0;
+
+    #[inline(always)]
+    fn to_key(self) -> i64 {
+        (self ^ 0x8000_0000_0000_0000) as i64
+    }
+
+    #[inline(always)]
+    fn from_key(key: i64) -> Self {
+        (key as u64) ^ 0x8000_0000_0000_0000
+    }
+
+    #[inline]
+    fn sort_small_in_place(slice: &mut [Self]) {
+        slice.sort_unstable();
+    }
+}
+
+impl LatticeKey64 for f64 {
+    const ZERO: Self = 0.0;
+
+    #[inline(always)]
+    fn to_key(self) -> i64 {
+        let bits = self.to_bits();
+        let mask = (((bits as i64) >> 63) as u64) & 0x7fff_ffff_ffff_ffff;
+        (bits ^ mask) as i64
+    }
+
+    #[inline(always)]
+    fn from_key(key: i64) -> Self {
+        let bits = key as u64;
+        let mask = ((key >> 63) as u64) & 0x7fff_ffff_ffff_ffff;
+        Self::from_bits(bits ^ mask)
+    }
+
+    #[inline]
+    fn sort_small_in_place(slice: &mut [Self]) {
+        slice.sort_unstable_by(Self::total_cmp);
+    }
+}
+
 #[derive(Clone, Copy)]
 struct KeyCount64 {
     key: i64,
     count: usize,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SignBitMode {
-    Preserve,
-    FlipMostSignificantBit,
 }
 
 fn insertion_sort_i64(slice: &mut [i64]) {
@@ -35,16 +114,194 @@ fn insertion_sort_i64(slice: &mut [i64]) {
     }
 }
 
+fn merge_sorted_halves_64<T: LatticeKey64>(slice: &mut [T], split: usize) {
+    if slice[split - 1].to_key() <= slice[split].to_key() {
+        return;
+    }
+    let first_val = slice[0];
+    let first_key = first_val.to_key();
+    if first_key == slice[split - 1].to_key() {
+        let insert_pos = slice[split..].partition_point(|x| x.to_key() < first_key);
+        slice.copy_within(split..split + insert_pos, 0);
+        slice[insert_pos..split + insert_pos].fill(first_val);
+        return;
+    }
+
+    let right_first_key = slice[split].to_key();
+    let trim_left = slice[..split].partition_point(|x| x.to_key() <= right_first_key);
+    let active = &mut slice[trim_left..];
+    let adjusted_split = split - trim_left;
+
+    let len = active.len();
+    let mut stack_buf = [T::ZERO; STACK_SCRATCH_MAX_64];
+    let mut heap_buf: Vec<T>;
+    let merged: &mut [T] = if len <= STACK_SCRATCH_MAX_64 {
+        &mut stack_buf[..len]
+    } else {
+        heap_buf = vec![T::ZERO; len];
+        &mut heap_buf
+    };
+
+    let (left, right) = active.split_at(adjusted_split);
+    let mut i = 0_usize;
+    let mut j = 0_usize;
+    let mut k = 0_usize;
+    while i < left.len() && j < right.len() {
+        let a = left[i];
+        let b = right[j];
+        if a.to_key() <= b.to_key() {
+            merged[k] = a;
+            i += 1;
+        } else {
+            merged[k] = b;
+            j += 1;
+        }
+        k += 1;
+    }
+    if i < left.len() {
+        let remaining = left.len() - i;
+        merged[k..k + remaining].copy_from_slice(&left[i..]);
+    } else if j < right.len() {
+        let remaining = right.len() - j;
+        merged[k..k + remaining].copy_from_slice(&right[j..]);
+    }
+    active.copy_from_slice(merged);
+}
+
+#[must_use]
+pub(crate) fn try_bitonic_run_merge_64<T: LatticeKey64>(slice: &mut [T]) -> bool {
+    let len = slice.len();
+    if len <= SMALL_SORT_CUTOFF_64 {
+        return false;
+    }
+
+    let step = len / 8;
+    let mut dir_changes = 0_usize;
+    let mut prev_dir = 0_i8;
+    for i in 1..8 {
+        let a = slice[(i - 1) * step].to_key();
+        let b = slice[i * step].to_key();
+        let dir = if b > a {
+            1_i8
+        } else if b < a {
+            -1_i8
+        } else {
+            prev_dir
+        };
+        if prev_dir != 0 && dir != 0 && dir != prev_dir {
+            dir_changes += 1;
+        }
+        if dir != 0 {
+            prev_dir = dir;
+        }
+    }
+    if dir_changes > 1 {
+        return false;
+    }
+
+    let mut peak = 0_usize;
+    while peak + 1 < len && slice[peak].to_key() <= slice[peak + 1].to_key() {
+        peak += 1;
+    }
+    if peak == len - 1 {
+        return true;
+    }
+
+    if peak == 0 {
+        let mut valley = 0_usize;
+        while valley + 1 < len && slice[valley].to_key() >= slice[valley + 1].to_key() {
+            valley += 1;
+        }
+        if valley == len - 1 {
+            slice.reverse();
+            return true;
+        }
+        let mut tail = valley + 1;
+        while tail + 1 < len && slice[tail].to_key() <= slice[tail + 1].to_key() {
+            tail += 1;
+        }
+        if tail == len - 1 {
+            slice[..=valley].reverse();
+            merge_sorted_halves_64(slice, valley + 1);
+            return true;
+        }
+        return false;
+    }
+
+    let mut tail = peak + 1;
+    while tail + 1 < len && slice[tail].to_key() >= slice[tail + 1].to_key() {
+        tail += 1;
+    }
+    if tail == len - 1 {
+        let mut stack_buf = [T::ZERO; STACK_SCRATCH_MAX_64];
+        let mut heap_buf: Vec<T>;
+        let merged: &mut [T] = if len <= STACK_SCRATCH_MAX_64 {
+            &mut stack_buf[..len]
+        } else {
+            heap_buf = vec![T::ZERO; len];
+            &mut heap_buf
+        };
+
+        let (left, right) = slice.split_at(peak + 1);
+        let mut i = 0_usize;
+        let mut j = right.len();
+        let mut k = 0_usize;
+        while i < left.len() && j > 0 {
+            let a = left[i];
+            let b = right[j - 1];
+            if a.to_key() <= b.to_key() {
+                merged[k] = a;
+                i += 1;
+            } else {
+                merged[k] = b;
+                j -= 1;
+            }
+            k += 1;
+        }
+        if i < left.len() {
+            let remaining = left.len() - i;
+            merged[k..k + remaining].copy_from_slice(&left[i..]);
+        } else {
+            while j > 0 {
+                merged[k] = right[j - 1];
+                j -= 1;
+                k += 1;
+            }
+        }
+        slice.copy_from_slice(merged);
+        return true;
+    }
+
+    if peak >= (len * 3) / 4 {
+        let first_key = slice[0].to_key();
+        if slice[peak / 2].to_key() == first_key {
+            while peak > 0 && slice[peak].to_key() != first_key {
+                peak -= 1;
+            }
+        }
+        lattice_sort_generic_64(&mut slice[peak + 1..]);
+        merge_sorted_halves_64(slice, peak + 1);
+        return true;
+    }
+
+    false
+}
+
 #[inline]
 fn sentinel_hash_64(val: i64, multiplier: u64) -> usize {
     let u = val as u64;
     (((u ^ (u >> 30)).wrapping_mul(multiplier)) >> 54) as usize
 }
 
-fn try_sentinel_hash_aggregation_i64(slice: &mut [i64]) -> bool {
+pub(crate) fn try_sentinel_hash_aggregation_64<T: LatticeKey64>(
+    slice: &mut [T],
+) -> HashAggregationOutcome {
     let len = slice.len();
-    if len <= 2048 {
-        return false;
+    if len <= STACK_SCRATCH_MAX_64 {
+        return HashAggregationOutcome {
+            sorted: false,
+            span_exceeds_horizon: true,
+        };
     }
 
     let mut probe = [0_i64; 128];
@@ -52,16 +309,22 @@ fn try_sentinel_hash_aggregation_i64(slice: &mut [i64]) -> bool {
     let indexed_anchors = anchors.iter().enumerate();
     for (window_idx, &base) in indexed_anchors {
         let dst_start = window_idx * 16;
-        probe[dst_start..dst_start + 16].copy_from_slice(&slice[base..base + 16]);
+        for k in 0..16 {
+            probe[dst_start + k] = slice[base + k].to_key();
+        }
     }
 
     let stride = ((len as u64 * 2_654_435_761) >> 32).max(1) as usize | 1;
     let mut idx = len / 7;
     for slot in &mut probe[80..] {
-        *slot = slice[idx % len];
+        *slot = slice[idx % len].to_key();
         idx = idx.wrapping_add(stride);
     }
     insertion_sort_i64(&mut probe);
+
+    let probe_span = (i128::from(probe[127]) - i128::from(probe[0])) as u128;
+    let horizon = (len as u128).min(DENSE_RANGE_MAX_SPAN_64);
+    let span_exceeds_horizon = probe_span > horizon;
 
     let mut unique_probe = [0_i64; 128];
     unique_probe[0] = probe[0];
@@ -69,7 +332,10 @@ fn try_sentinel_hash_aggregation_i64(slice: &mut [i64]) -> bool {
     for i in 1..128 {
         if probe[i] != probe[i - 1] {
             if unique_probe_len >= 80 {
-                return false;
+                return HashAggregationOutcome {
+                    sorted: false,
+                    span_exceeds_horizon,
+                };
             }
             unique_probe[unique_probe_len] = probe[i];
             unique_probe_len += 1;
@@ -116,7 +382,8 @@ fn try_sentinel_hash_aggregation_i64(slice: &mut [i64]) -> bool {
         }
     }
 
-    for &val in slice.iter() {
+    for &item in slice.iter() {
+        let val = item.to_key();
         let home_slot = sentinel_hash_64(val, chosen_multiplier);
         if keys[home_slot] == val {
             counts[home_slot] += 1;
@@ -125,7 +392,10 @@ fn try_sentinel_hash_aggregation_i64(slice: &mut [i64]) -> bool {
             loop {
                 if !used[slot] {
                     if unique_count >= 384 {
-                        return false;
+                        return HashAggregationOutcome {
+                            sorted: false,
+                            span_exceeds_horizon,
+                        };
                     }
                     used[slot] = true;
                     keys[slot] = val;
@@ -166,19 +436,71 @@ fn try_sentinel_hash_aggregation_i64(slice: &mut [i64]) -> bool {
 
     let mut offset = 0_usize;
     for entry in &entries[..entry_count] {
-        slice[offset..offset + entry.count].fill(entry.key);
+        slice[offset..offset + entry.count].fill(T::from_key(entry.key));
         offset += entry.count;
+    }
+    HashAggregationOutcome {
+        sorted: true,
+        span_exceeds_horizon,
+    }
+}
+
+#[must_use]
+pub(crate) fn try_dense_range_count_64<T: LatticeKey64>(slice: &mut [T]) -> bool {
+    let len = slice.len();
+    if len <= SMALL_SORT_CUTOFF_64 {
+        return false;
+    }
+
+    let first_key = slice[0].to_key();
+    let mut min_val = first_key;
+    let mut max_val = first_key;
+    for &item in &slice[1..] {
+        let x = item.to_key();
+        if x < min_val {
+            min_val = x;
+        }
+        if x > max_val {
+            max_val = x;
+        }
+    }
+
+    let span = (i128::from(max_val) - i128::from(min_val)) as u128;
+    if span == 0 {
+        return true;
+    }
+
+    let horizon = (len as u128).min(DENSE_RANGE_MAX_SPAN_64);
+    if span > horizon {
+        return false;
+    }
+
+    let table_len = (span + 1) as usize;
+    let mut density = vec![0_u32; table_len];
+    let base = i128::from(min_val);
+    for &item in slice.iter() {
+        let offset_idx = (i128::from(item.to_key()) - base) as usize;
+        density[offset_idx] += 1;
+    }
+
+    let mut offset = 0_usize;
+    let indexed_density = density.iter().enumerate();
+    for (idx, &count) in indexed_density {
+        if count > 0 {
+            let val = T::from_key((base + idx as i128) as i64);
+            let count_usize = count as usize;
+            slice[offset..offset + count_usize].fill(val);
+            offset += count_usize;
+        }
     }
     true
 }
 
 #[inline]
-fn scatter_pass_i64(
-    src: &[i64],
-    dst: &mut [i64],
+pub(crate) fn scatter_pass_64<T: LatticeKey64, const SHIFT: usize, const FLIP_SIGN: bool>(
+    src: &[T],
+    dst: &mut [T],
     histogram: &[u32; 256],
-    shift: usize,
-    sign_mode: SignBitMode,
 ) {
     let mut offsets = [0_usize; 256];
     let mut sum = 0_usize;
@@ -188,35 +510,47 @@ fn scatter_pass_i64(
         sum += count as usize;
     }
 
-    for &x in src {
-        let raw = (x as u64) >> shift;
-        let bucket = match sign_mode {
-            SignBitMode::FlipMostSignificantBit => ((raw ^ 0x80) & 0xff) as usize,
-            SignBitMode::Preserve => (raw & 0xff) as usize,
+    for &item in src {
+        let raw = (item.to_key() as u64) >> SHIFT;
+        let bucket = if FLIP_SIGN {
+            ((raw ^ 0x80) & 0xff) as usize
+        } else {
+            (raw & 0xff) as usize
         };
-        dst[offsets[bucket]] = x;
+        dst[offsets[bucket]] = item;
         offsets[bucket] += 1;
     }
 }
 
-/// Sorts a mutable slice of 64-bit signed integers (`i64`) in ascending order using
-/// dual-sentinel L1 hash aggregation and an 8-pass LSD radix sort with degenerate-byte skipping.
-pub fn lattice_sort_i64(slice: &mut [i64]) {
+/// 8-pass 8-bit LSD radix sort with 4x unrolled single-pass histograms and degenerate-byte skipping.
+pub(crate) fn radix_lsd_fused_sort_64<T: LatticeKey64>(slice: &mut [T]) {
     let len = slice.len();
-    if len <= 128 {
-        if len > 1 {
-            slice.sort_unstable();
-        }
-        return;
-    }
-
-    if try_sentinel_hash_aggregation_i64(slice) {
+    if len <= SMALL_SORT_CUTOFF_64 {
+        T::sort_small_in_place(slice);
         return;
     }
 
     let mut histograms = [[0_u32; 256]; 8];
-    for &x in slice.iter() {
-        let u = x as u64;
+    let (chunks, remainder) = slice.as_chunks::<4>();
+    for chunk in chunks {
+        let u0 = chunk[0].to_key() as u64;
+        let u1 = chunk[1].to_key() as u64;
+        let u2 = chunk[2].to_key() as u64;
+        let u3 = chunk[3].to_key() as u64;
+
+        for u in [u0, u1, u2, u3] {
+            histograms[0][(u & 0xff) as usize] += 1;
+            histograms[1][((u >> 8) & 0xff) as usize] += 1;
+            histograms[2][((u >> 16) & 0xff) as usize] += 1;
+            histograms[3][((u >> 24) & 0xff) as usize] += 1;
+            histograms[4][((u >> 32) & 0xff) as usize] += 1;
+            histograms[5][((u >> 40) & 0xff) as usize] += 1;
+            histograms[6][((u >> 48) & 0xff) as usize] += 1;
+            histograms[7][((u >> 56) ^ 0x80) as usize] += 1;
+        }
+    }
+    for &item in remainder {
+        let u = item.to_key() as u64;
         histograms[0][(u & 0xff) as usize] += 1;
         histograms[1][((u >> 8) & 0xff) as usize] += 1;
         histograms[2][((u >> 16) & 0xff) as usize] += 1;
@@ -227,31 +561,70 @@ pub fn lattice_sort_i64(slice: &mut [i64]) {
         histograms[7][((u >> 56) ^ 0x80) as usize] += 1;
     }
 
+    let can_skip = len <= u32::MAX as usize;
     let n32 = len as u32;
-    let mut scratch = vec![0_i64; len];
+    let mut stack_buf = [T::ZERO; STACK_SCRATCH_MAX_64];
+    let mut heap_buf: Vec<T>;
+    let scratch: &mut [T] = if len <= STACK_SCRATCH_MAX_64 {
+        &mut stack_buf[..len]
+    } else {
+        heap_buf = vec![T::ZERO; len];
+        &mut heap_buf
+    };
     let mut in_scratch = false;
 
-    let indexed_histograms = histograms.iter().enumerate();
-    for (byte_index, histogram) in indexed_histograms {
-        if histogram.contains(&n32) {
-            continue;
-        }
-        let shift = byte_index * 8;
-        let sign_mode = if byte_index == 7 {
-            SignBitMode::FlipMostSignificantBit
-        } else {
-            SignBitMode::Preserve
+    macro_rules! run_pass {
+        ($idx:expr, $shift:expr, $flip:expr) => {
+            if !(can_skip && histograms[$idx].contains(&n32)) {
+                if in_scratch {
+                    scatter_pass_64::<T, $shift, $flip>(scratch, slice, &histograms[$idx]);
+                    in_scratch = false;
+                } else {
+                    scatter_pass_64::<T, $shift, $flip>(slice, scratch, &histograms[$idx]);
+                    in_scratch = true;
+                }
+            }
         };
-        if in_scratch {
-            scatter_pass_i64(&scratch, slice, histogram, shift, sign_mode);
-            in_scratch = false;
-        } else {
-            scatter_pass_i64(slice, &mut scratch, histogram, shift, sign_mode);
-            in_scratch = true;
-        }
     }
 
+    run_pass!(0, 0, false);
+    run_pass!(1, 8, false);
+    run_pass!(2, 16, false);
+    run_pass!(3, 24, false);
+    run_pass!(4, 32, false);
+    run_pass!(5, 40, false);
+    run_pass!(6, 48, false);
+    run_pass!(7, 56, true);
+
     if in_scratch {
-        slice.copy_from_slice(&scratch);
+        slice.copy_from_slice(scratch);
     }
+}
+
+/// Generic 64-bit adaptive sorting pipeline for any `T: LatticeKey64` (`i64`, `u64`, `f64`).
+pub fn lattice_sort_generic_64<T: LatticeKey64>(slice: &mut [T]) {
+    if slice.len() <= SMALL_SORT_CUTOFF_64 {
+        if slice.len() > 1 {
+            T::sort_small_in_place(slice);
+        }
+        return;
+    }
+    if try_bitonic_run_merge_64(slice) {
+        return;
+    }
+    let outcome = try_sentinel_hash_aggregation_64(slice);
+    if outcome.sorted {
+        return;
+    }
+    if !outcome.span_exceeds_horizon && try_dense_range_count_64(slice) {
+        return;
+    }
+    radix_lsd_fused_sort_64(slice);
+}
+
+/// Sorts a mutable slice of 64-bit signed integers (`i64`) in ascending order using the
+/// adaptive 64-bit `latticesort` pipeline.
+#[inline]
+pub fn lattice_sort_i64(slice: &mut [i64]) {
+    lattice_sort_generic_64(slice);
 }
