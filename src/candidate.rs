@@ -13,6 +13,7 @@ const DENSE_RANGE_MAX_SPAN: u64 = 1_048_576;
 pub(crate) const SMALL_SORT_CUTOFF: usize = 384;
 pub(crate) const STACK_SCRATCH_MAX: usize = 2048;
 const MSB_L2_PARTITION_THRESHOLD: usize = 1_500_000;
+const MSB_ENTROPY_GATE_MIN_LEN: usize = 200_000;
 
 const SENTINEL_HASH_MULTIPLIERS_32: [u32; 4] = [0x9e37_79b9, 0x85eb_ca6b, 0xc2b2_ae35, 0x27d4_eb2f];
 
@@ -803,10 +804,9 @@ pub(crate) fn l2_local_3pass_radix_sort<T: LatticeKey32>(
     }
 }
 
-/// Hybrid MSB-first + L2-local 3-pass LSD radix sort for large slices ($N \ge 1{,}500{,}000$).
-pub(crate) fn radix_msb_l2_hybrid_sort_generic<T: LatticeKey32>(slice: &mut [T]) {
-    let len = slice.len();
-    let mut h3 = [0_u32; 256];
+/// Fills `h3` with the Most Significant Byte histogram of `slice` (sign-flipped onto the
+/// unsigned order lattice).
+pub(crate) fn msb_histogram_generic<T: LatticeKey32>(slice: &[T], h3: &mut [u32; 256]) {
     let (chunks, remainder) = slice.as_chunks::<4>();
     for chunk in chunks {
         h3[(((chunk[0].to_key() as u32) >> 24) ^ 0x80) as usize] += 1;
@@ -817,7 +817,45 @@ pub(crate) fn radix_msb_l2_hybrid_sort_generic<T: LatticeKey32>(slice: &mut [T])
     for &item in remainder {
         h3[(((item.to_key() as u32) >> 24) ^ 0x80) as usize] += 1;
     }
+}
 
+/// Reports whether the 8-point strided envelope of `slice` is monotone (at most one direction),
+/// which identifies barely perturbed sorted data that the LSD cascade scatters while preserving.
+fn has_monotone_envelope_generic<T: LatticeKey32>(slice: &[T]) -> bool {
+    let step = slice.len() / 8;
+    let mut prev = 0_i8;
+    for i in 1..8 {
+        let a = slice[(i - 1) * step].to_key();
+        let b = slice[i * step].to_key();
+        let dir = if b > a {
+            1_i8
+        } else if b < a {
+            -1_i8
+        } else {
+            0
+        };
+        if dir != 0 {
+            if prev != 0 && dir != prev {
+                return false;
+            }
+            prev = dir;
+        }
+    }
+    true
+}
+
+/// Hybrid MSB-first + L2-local 3-pass LSD radix sort for large slices ($N \ge 1{,}500{,}000$).
+pub(crate) fn radix_msb_l2_hybrid_sort_generic<T: LatticeKey32>(slice: &mut [T]) {
+    let mut h3 = [0_u32; 256];
+    msb_histogram_generic(slice, &mut h3);
+    radix_msb_from_histogram_generic(slice, &h3);
+}
+
+/// MSB-first partition into 256 L2-resident buckets followed by a local 3-pass LSD sort per
+/// bucket, driven by an already computed Most Significant Byte `h3`.
+pub(crate) fn radix_msb_from_histogram_generic<T: LatticeKey32>(slice: &mut [T], h3: &[u32; 256]) {
+    let len = slice.len();
+    let h3 = *h3;
     let mut scratch = vec![T::ZERO; len];
     let can_skip = len <= u32::MAX as usize;
     let n32 = len as u32;
@@ -853,6 +891,16 @@ pub(crate) fn radix_msb_l2_hybrid_sort_generic<T: LatticeKey32>(slice: &mut [T])
             l2_local_3pass_radix_sort(&mut slice[start..end], &mut scratch[start..end]);
         }
     }
+}
+
+/// Runs the 4-pass fused 8-bit LSD radix stage on `slice` without running the adaptive heuristics.
+pub fn radix_lsd_fused_sort(slice: &mut [i32]) {
+    radix_lsd_fused_sort_generic(slice);
+}
+
+/// Runs the MSB-first + L2-local radix cascade on `slice` without running the adaptive heuristics.
+pub fn radix_msb_l2_hybrid_sort(slice: &mut [i32]) {
+    radix_msb_l2_hybrid_sort_generic(slice);
 }
 
 /// 4-pass 8-bit LSD radix sort with a fused single-pass 4x256 histogram and degenerate-byte skipping.
@@ -909,6 +957,25 @@ pub(crate) fn radix_lsd_fused_sort_generic<T: LatticeKey32>(slice: &mut [T]) {
 
     let can_skip = len <= u32::MAX as usize;
     let n32 = len as u32;
+
+    // Entropy gate: an MSB-first cascade only repays its extra partition when every byte is
+    // populated (no degenerate skip available), the top byte is spread over the whole fan-out,
+    // and the envelope is not monotone (near-sorted data keeps its locality under LSD).
+    if len >= MSB_ENTROPY_GATE_MIN_LEN
+        && ![&h0, &h1, &h2, &h3].iter().any(|hist| hist.contains(&n32))
+    {
+        let occupied = h3.iter().filter(|&&count| count > 0).count();
+        let widest = h3.iter().copied().max().unwrap_or(0);
+        if occupied > 200 && widest.saturating_mul(8) < n32 && !has_monotone_envelope_generic(slice)
+        {
+            if false && std::env::var_os("LATT_DEBUG").is_some() {
+                eprintln!("MSB gate fired len={len} occupied={occupied} widest={widest}");
+            }
+            radix_msb_from_histogram_generic(slice, &h3);
+            return;
+        }
+    }
+
     let mut stack_buf = [T::ZERO; STACK_SCRATCH_MAX];
     let mut heap_buf: Vec<T>;
     let scratch: &mut [T] = if len <= STACK_SCRATCH_MAX {
@@ -982,4 +1049,177 @@ pub fn lattice_sort_generic_32<T: LatticeKey32>(data: &mut [T]) {
 #[inline]
 pub fn lattice_sort_i32(data: &mut [i32]) {
     lattice_sort_generic_32(data);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stage1_bitonic_and_plateau_snap_back() {
+        for &len in &[1000_usize, 3000_usize] {
+            let mut asc: Vec<i32> = (0..len as i32).collect();
+            assert!(try_bitonic_run_merge(&mut asc));
+            assert!(asc.is_sorted());
+
+            let mut desc: Vec<i32> = (0..len as i32).rev().collect();
+            let mut desc_expected = desc.clone();
+            desc_expected.sort_unstable();
+            assert!(try_bitonic_run_merge(&mut desc));
+            assert_eq!(desc, desc_expected);
+
+            let mid = len / 2;
+            let mut peak: Vec<i32> = (0..mid as i32)
+                .chain((0..(len - mid) as i32).rev())
+                .collect();
+            let mut peak_expected = peak.clone();
+            peak_expected.sort_unstable();
+            assert!(try_bitonic_run_merge(&mut peak));
+            assert_eq!(peak, peak_expected);
+
+            let mut valley: Vec<i32> = (0..mid as i32).rev().chain(0..(len - mid) as i32).collect();
+            let mut valley_expected = valley.clone();
+            valley_expected.sort_unstable();
+            assert!(try_bitonic_run_merge(&mut valley));
+            assert_eq!(valley, valley_expected);
+        }
+
+        // Plateau snap-back branch: peak >= (len * 3) / 4 with constant prefix matching slice[peak / 2],
+        // followed by a short ascending ramp and an unsorted tail containing values below and above 50.
+        let n = 2000_usize;
+        let mut plateau = Vec::with_capacity(n);
+        plateau.extend(std::iter::repeat_n(50_i32, 1200));
+        plateau.extend(51_i32..501_i32); // indices 1200..1650 -> peak = 1649 >= 1500
+        for i in 1650..n {
+            let v = if i % 2 == 0 {
+                -(i as i32)
+            } else {
+                (i as i32) * 2
+            };
+            plateau.push(v);
+        }
+        let mut expected = plateau.clone();
+        expected.sort_unstable();
+        assert!(try_bitonic_run_merge(&mut plateau));
+        assert_eq!(plateau, expected);
+    }
+
+    #[test]
+    fn test_stage2_sentinel_hash_boundaries_and_home_slot_zero_collision() {
+        // Home-slot-zero triple collision under SENTINEL_HASH_MULTIPLIERS_32[0].
+        let mult0 = SENTINEL_HASH_MULTIPLIERS_32[0];
+        let home0 = sentinel_hash_1024(0, mult0);
+        let mut colliding_key = 2_i32;
+        while sentinel_hash_1024(colliding_key, mult0) != home0 {
+            colliding_key += 1;
+        }
+        let mut triple = vec![0_i32; 3000];
+        for (idx, slot) in triple.iter_mut().enumerate() {
+            *slot = if idx % 3 == 0 { 0 } else { 1 };
+        }
+        // Place colliding_key outside the probe windows so mult0 remains chosen, forcing linear probing from home0.
+        triple[1] = colliding_key;
+        triple[2] = colliding_key;
+        let mut triple_expected = triple.clone();
+        triple_expected.sort_unstable();
+        let outcome_triple = try_sentinel_hash_aggregation(&mut triple);
+        assert!(outcome_triple.sorted);
+        assert_eq!(triple, triple_expected);
+
+        // Exact cardinality boundary: K = 384 (succeeds) vs K = 385 (aborts cleanly).
+        let n = 4096_usize;
+        let base_prefix = (n * 85) / 100;
+        let mut k384 = Vec::with_capacity(n);
+        for i in 0..base_prefix {
+            k384.push((i % 10) as i32 * 1_000_000);
+        }
+        for i in 0..(n - base_prefix) {
+            let distinct_idx = if i < 374 { 10 + i } else { 10 };
+            k384.push((distinct_idx as i32) * 1_000_000);
+        }
+        let mut k384_expected = k384.clone();
+        k384_expected.sort_unstable();
+        let outcome_384 = try_sentinel_hash_aggregation(&mut k384);
+        assert!(outcome_384.sorted);
+        assert_eq!(k384, k384_expected);
+
+        let mut k385 = Vec::with_capacity(n);
+        for i in 0..base_prefix {
+            k385.push((i % 10) as i32 * 1_000_000);
+        }
+        for i in 0..(n - base_prefix) {
+            let distinct_idx = if i < 375 { 10 + i } else { 10 };
+            k385.push((distinct_idx as i32) * 1_000_000);
+        }
+        let outcome_385 = try_sentinel_hash_aggregation(&mut k385);
+        assert!(!outcome_385.sorted);
+
+        // IEEE-754 -0.0_f32 and +0.0_f32 separation inside the dual-sentinel L1 hash table.
+        let mut f32_signed_zeros = Vec::with_capacity(3000);
+        for i in 0..3000 {
+            match i % 4 {
+                0 => f32_signed_zeros.push(0.0_f32),
+                1 => f32_signed_zeros.push(-0.0_f32),
+                2 => f32_signed_zeros.push(1.5_f32),
+                _ => f32_signed_zeros.push(-1.5_f32),
+            }
+        }
+        let mut f32_expected = f32_signed_zeros.clone();
+        f32_expected.sort_by(f32::total_cmp);
+        let f32_outcome = try_sentinel_hash_aggregation_generic(&mut f32_signed_zeros);
+        assert!(f32_outcome.sorted);
+        for (a, b) in f32_signed_zeros.iter().zip(f32_expected.iter()) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+    }
+
+    #[test]
+    fn test_stage3_dense_range_count_direct() {
+        let mut equal = vec![7_i32; 1000];
+        assert!(try_dense_range_count(&mut equal));
+
+        let n = 2000_usize;
+        let mut exact_horizon: Vec<i32> = (0..n).map(|i| ((i * 7) % (n + 1)) as i32).collect();
+        exact_horizon[0] = 0;
+        exact_horizon[1] = n as i32; // span == len
+        let mut expected = exact_horizon.clone();
+        expected.sort_unstable();
+        assert!(try_dense_range_count(&mut exact_horizon));
+        assert_eq!(exact_horizon, expected);
+
+        let mut exceeds_horizon: Vec<i32> = (0..n).map(|i| (i % 50) as i32).collect();
+        exceeds_horizon[0] = 0;
+        exceeds_horizon[1] = (n + 1) as i32; // span == len + 1
+        assert!(!try_dense_range_count(&mut exceeds_horizon));
+    }
+
+    #[test]
+    fn test_stage4_l2_sub_bucket_split_above_262k() {
+        let n = 270_000_usize; // > 262_144 threshold in l2_local_3pass_radix_sort
+
+        // Case A: variable Byte 2
+        let mut seed = 0x1357_2468_u32;
+        let mut scratch_a = Vec::with_capacity(n);
+        for _ in 0..n {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            scratch_a.push((0x2A00_0000_u32 | (seed & 0x00ff_ffff)) as i32);
+        }
+        let mut expected_a = scratch_a.clone();
+        expected_a.sort_unstable();
+        let mut slice_a = vec![0_i32; n];
+        l2_local_3pass_radix_sort(&mut slice_a, &mut scratch_a);
+        assert_eq!(slice_a, expected_a);
+
+        // Case B: constant Byte 2 (h2.contains(&n32) fast path)
+        let mut scratch_b = Vec::with_capacity(n);
+        for _ in 0..n {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            scratch_b.push((0x2A55_0000_u32 | (seed & 0x0000_ffff)) as i32);
+        }
+        let mut expected_b = scratch_b.clone();
+        expected_b.sort_unstable();
+        let mut slice_b = vec![0_i32; n];
+        l2_local_3pass_radix_sort(&mut slice_b, &mut scratch_b);
+        assert_eq!(slice_b, expected_b);
+    }
 }

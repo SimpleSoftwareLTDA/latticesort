@@ -641,3 +641,140 @@ pub fn lattice_sort_generic_64<T: LatticeKey64>(slice: &mut [T]) {
 pub fn lattice_sort_i64(slice: &mut [i64]) {
     lattice_sort_generic_64(slice);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_64bit_stage1_bitonic_and_plateau_snap_back() {
+        let mid = 1000_usize;
+        let len = 2000_usize;
+
+        let mut peak: Vec<i64> = (0..mid as i64)
+            .chain((0..(len - mid) as i64).rev())
+            .collect();
+        let mut peak_expected = peak.clone();
+        peak_expected.sort_unstable();
+        assert!(try_bitonic_run_merge_64(&mut peak));
+        assert_eq!(peak, peak_expected);
+
+        let mut valley: Vec<i64> = (0..mid as i64).rev().chain(0..(len - mid) as i64).collect();
+        let mut valley_expected = valley.clone();
+        valley_expected.sort_unstable();
+        assert!(try_bitonic_run_merge_64(&mut valley));
+        assert_eq!(valley, valley_expected);
+
+        // Plateau snap-back branch
+        let mut plateau = Vec::with_capacity(len);
+        plateau.extend(std::iter::repeat_n(50_i64, 1200));
+        plateau.extend(51_i64..501_i64);
+        for i in 1650..len {
+            let v = if i % 2 == 0 {
+                -(i as i64)
+            } else {
+                (i as i64) * 2
+            };
+            plateau.push(v);
+        }
+        let mut plateau_expected = plateau.clone();
+        plateau_expected.sort_unstable();
+        assert!(try_bitonic_run_merge_64(&mut plateau));
+        assert_eq!(plateau, plateau_expected);
+    }
+
+    #[test]
+    fn test_64bit_stage2_sentinel_hash_and_signed_zero_f64() {
+        let mult0 = SENTINEL_HASH_MULTIPLIERS_64[0];
+        let home0 = sentinel_hash_64(0, mult0);
+        let mut colliding_key = 2_i64;
+        while sentinel_hash_64(colliding_key, mult0) != home0 {
+            colliding_key += 1;
+        }
+        let mut triple = vec![0_i64; 3000];
+        for (idx, slot) in triple.iter_mut().enumerate() {
+            *slot = if idx % 3 == 0 { 0 } else { 1 };
+        }
+        triple[1] = colliding_key;
+        triple[2] = colliding_key;
+        let mut triple_expected = triple.clone();
+        triple_expected.sort_unstable();
+        let outcome = try_sentinel_hash_aggregation_64(&mut triple);
+        assert!(outcome.sorted);
+        assert_eq!(triple, triple_expected);
+
+        let mut f64_signed_zeros = Vec::with_capacity(3000);
+        for i in 0..3000 {
+            match i % 4 {
+                0 => f64_signed_zeros.push(0.0_f64),
+                1 => f64_signed_zeros.push(-0.0_f64),
+                2 => f64_signed_zeros.push(2.5_f64),
+                _ => f64_signed_zeros.push(-2.5_f64),
+            }
+        }
+        let mut f64_expected = f64_signed_zeros.clone();
+        f64_expected.sort_by(f64::total_cmp);
+        let f64_outcome = try_sentinel_hash_aggregation_64(&mut f64_signed_zeros);
+        assert!(f64_outcome.sorted);
+        for (a, b) in f64_signed_zeros.iter().zip(f64_expected.iter()) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+    }
+
+    #[test]
+    fn test_64bit_stage3_dense_range_count_extremes() {
+        let n = 1000_usize;
+        let mut near_max: Vec<i64> = (0..n).map(|i| i64::MAX - ((i * 13) % 500) as i64).collect();
+        let mut near_max_expected = near_max.clone();
+        near_max_expected.sort_unstable();
+        assert!(try_dense_range_count_64(&mut near_max));
+        assert_eq!(near_max, near_max_expected);
+
+        let mut near_min: Vec<i64> = (0..n).map(|i| i64::MIN + ((i * 17) % 500) as i64).collect();
+        let mut near_min_expected = near_min.clone();
+        near_min_expected.sort_unstable();
+        assert!(try_dense_range_count_64(&mut near_min));
+        assert_eq!(near_min, near_min_expected);
+    }
+
+    #[test]
+    fn test_64bit_stage4_odd_and_even_active_radix_passes() {
+        let n = 2048_usize;
+        let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+
+        // 1 active byte (Byte 0 only -> in_scratch == true copy-back)
+        let mut one_byte = Vec::with_capacity(n);
+        for _ in 0..n {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            one_byte.push((seed & 0xff) as i64);
+        }
+        let mut one_expected = one_byte.clone();
+        one_expected.sort_unstable();
+        radix_lsd_fused_sort_64(&mut one_byte);
+        assert_eq!(one_byte, one_expected);
+
+        // 3 active bytes (Bytes 0, 3, 7 -> in_scratch == true copy-back)
+        let mut three_bytes = Vec::with_capacity(n);
+        for _ in 0..n {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let val = (seed & 0xff) | ((seed & 0xff00) << 16) | ((seed & 0x00ff_0000) << 40);
+            three_bytes.push(val as i64);
+        }
+        let mut three_expected = three_bytes.clone();
+        three_expected.sort_unstable();
+        radix_lsd_fused_sort_64(&mut three_bytes);
+        assert_eq!(three_bytes, three_expected);
+
+        // 2 active bytes (Bytes 0, 7 -> in_scratch == false)
+        let mut two_bytes = Vec::with_capacity(n);
+        for _ in 0..n {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let val = (seed & 0xff) | ((seed & 0xff00) << 48);
+            two_bytes.push(val as i64);
+        }
+        let mut two_expected = two_bytes.clone();
+        two_expected.sort_unstable();
+        radix_lsd_fused_sort_64(&mut two_bytes);
+        assert_eq!(two_bytes, two_expected);
+    }
+}

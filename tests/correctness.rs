@@ -249,3 +249,111 @@ fn test_polymorphic_types_and_ieee754_edge_cases() {
     u64_par.par_lattice_sort();
     assert_eq!(u64_par, u64_par_expected);
 }
+
+#[test]
+fn test_degenerate_byte_combinations_32_and_64() {
+    let mut rng = SplitMix64::new(0xABCD_EF01);
+    let len = 4096_usize;
+
+    // 32-bit: 2 active bytes (Byte 0 + Byte 3 active, Bytes 1 & 2 constant -> > 384 keys, span > 1M)
+    let mut two_bytes_32: Vec<i32> = (0..len)
+        .map(|_| {
+            let r = rng.next_u64() as u32;
+            ((r & 0x0000_00ff) | (r & 0xff00_0000) | 0x00AA_5500) as i32
+        })
+        .collect();
+    let mut two_bytes_32_expected = two_bytes_32.clone();
+    two_bytes_32_expected.sort_unstable();
+    lattice_sort_i32(&mut two_bytes_32);
+    assert_eq!(two_bytes_32, two_bytes_32_expected);
+
+    // 32-bit: 3 active bytes (Bytes 0, 2, 3 active -> odd number of radix passes -> in_scratch copy-back)
+    let mut three_bytes_32: Vec<i32> = (0..len)
+        .map(|_| {
+            let r = rng.next_u64() as u32;
+            ((r & 0xffff_00ff) | 0x0000_5A00) as i32
+        })
+        .collect();
+    let mut three_bytes_32_expected = three_bytes_32.clone();
+    three_bytes_32_expected.sort_unstable();
+    lattice_sort_i32(&mut three_bytes_32);
+    assert_eq!(three_bytes_32, three_bytes_32_expected);
+
+    // 64-bit: 3 active bytes (Bytes 0, 4, 7 active -> odd number of passes via public API)
+    let mut three_bytes_64: Vec<i64> = (0..len)
+        .map(|_| {
+            let r = rng.next_u64();
+            let active = (r & 0xff) | (r & 0x0000_00ff_0000_0000) | (r & 0xff00_0000_0000_0000);
+            (active | 0x0055_5555_0055_5500) as i64
+        })
+        .collect();
+    let mut three_bytes_64_expected = three_bytes_64.clone();
+    three_bytes_64_expected.sort_unstable();
+    lattice_sort_i64(&mut three_bytes_64);
+    assert_eq!(three_bytes_64, three_bytes_64_expected);
+}
+
+#[test]
+fn test_parallel_degenerate_msb_and_ieee754_total_order() {
+    let mut rng = SplitMix64::new(0x5555_AAAA);
+    let len = 210_000_usize;
+
+    // All elements share the exact same MSB (Byte 3 == 0x2A), triggering msb_histogram.contains(&len).
+    let mut i32_same_msb: Vec<i32> = (0..len)
+        .map(|_| ((0x2A00_0000_u32) | ((rng.next_u64() as u32) & 0x00ff_ffff)) as i32)
+        .collect();
+    let mut i32_same_msb_expected = i32_same_msb.clone();
+    i32_same_msb_expected.sort_unstable();
+    parallel_lattice_sort(&mut i32_same_msb);
+    assert_eq!(i32_same_msb, i32_same_msb_expected);
+
+    // 64-bit parallel with identical MSB (Byte 7 == 0x42).
+    let mut i64_same_msb: Vec<i64> = (0..len)
+        .map(|_| ((0x4200_0000_0000_0000_u64) | (rng.next_u64() & 0x00ff_ffff_ffff_ffff)) as i64)
+        .collect();
+    let mut i64_same_msb_expected = i64_same_msb.clone();
+    i64_same_msb_expected.sort_unstable();
+    i64_same_msb.par_lattice_sort();
+    assert_eq!(i64_same_msb, i64_same_msb_expected);
+
+    // Parallel IEEE-754 total order for f32 and f64 with signed zeros, subnormals, infinities, NaNs.
+    let mut f32_par: Vec<f32> = (0..len)
+        .map(|i| match i % 256 {
+            0 => 0.0_f32,
+            1 => -0.0_f32,
+            2 => f32::MIN_POSITIVE,
+            3 => -f32::MIN_POSITIVE,
+            4 => f32::INFINITY,
+            5 => f32::NEG_INFINITY,
+            6 => f32::NAN,
+            7 => -f32::NAN,
+            _ => (rng.next_i32() as f32) * 0.01,
+        })
+        .collect();
+    let mut f32_par_expected = f32_par.clone();
+    f32_par_expected.sort_by(f32::total_cmp);
+    f32_par.par_lattice_sort();
+    for (a, b) in f32_par.iter().zip(f32_par_expected.iter()) {
+        assert_eq!(a.to_bits(), b.to_bits());
+    }
+
+    let mut f64_par: Vec<f64> = (0..len)
+        .map(|i| match i % 256 {
+            0 => 0.0_f64,
+            1 => -0.0_f64,
+            2 => f64::MIN_POSITIVE,
+            3 => -f64::MIN_POSITIVE,
+            4 => f64::INFINITY,
+            5 => f64::NEG_INFINITY,
+            6 => f64::NAN,
+            7 => -f64::NAN,
+            _ => (rng.next_i64() as f64) * 1e-6,
+        })
+        .collect();
+    let mut f64_par_expected = f64_par.clone();
+    f64_par_expected.sort_by(f64::total_cmp);
+    f64_par.par_lattice_sort();
+    for (a, b) in f64_par.iter().zip(f64_par_expected.iter()) {
+        assert_eq!(a.to_bits(), b.to_bits());
+    }
+}
