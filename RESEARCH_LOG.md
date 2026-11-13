@@ -86,3 +86,4 @@ Para evitar distorções de interpretação entre medições históricas, todas 
 | `exp18` | Front 5: 1-Billion 2-Level Cascade ($10^9$) | Sub-baldes de 61 KB no Byte 2 (`4 GB`) | 2913.000 | 22371.000 | **7.68x** | **KEEP** |
 | `exp19` | Front 6: Small-Slice Crossover (`384`) | Cruzamento L1 ($1024+5N$ vs $N\log_2 N$) | **1.119** | **5.589** | **4.99x** | **KEEP** |
 | `exp20` | Front 7: Zero-Buffer Bijective Generics | `LatticeKey32`/`LatticeKey64` sem `mapped` + 4 estágios 64-bit + `par_lattice_sort` | **1.490** | **5.420** | **3.64x** | **KEEP** |
+| `exp21` | Front 8: Cloudflare Bitpacked & Wire Entries | Bitmap `[u64; 16]` (`tzcnt`) + entradas `u64` `(key, count)` sem padding | **1.064** | **5.083** | **4.78x** | **KEEP** |

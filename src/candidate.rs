@@ -308,6 +308,14 @@ fn sentinel_hash_1024(val: i32, multiplier: u32) -> usize {
 }
 
 /// Generic 1024-slot dual-sentinel L1 hash aggregation for any `T: LatticeKey32`.
+///
+/// Incorporates two memory-layout optimizations inspired by Cloudflare's 1.1.1.1 cache design:
+/// 1. **Bitpacked Occupancy (`[u64; 16]` = 128 B instead of `[bool; 1024]` = 1024 B)**:
+///    Shrinks the occupancy table by 8x (to 2 cache lines) and enumerates active slots in
+///    $O(K)$ hardware `tzcnt` (`trailing_zeros`) steps instead of scanning all 1024 slots.
+/// 2. **Wire-Packed 64-Bit `(key, count)` Entries (`u64` instead of 16-byte padded struct)**:
+///    Packs the order-preserving unsigned key in the upper 32 bits and the count in the lower
+///    32 bits, eliminating 4 bytes of struct alignment padding per entry (50% smaller footprint).
 pub(crate) fn try_sentinel_hash_aggregation_generic<T: LatticeKey32>(
     slice: &mut [T],
 ) -> HashAggregationOutcome {
@@ -359,15 +367,17 @@ pub(crate) fn try_sentinel_hash_aggregation_generic<T: LatticeKey32>(
 
     let mut chosen_multiplier = SENTINEL_HASH_MULTIPLIERS_32[0];
     for &multiplier in &SENTINEL_HASH_MULTIPLIERS_32 {
-        let mut occupied = [false; 1024];
+        let mut occupied_bits = [0_u64; 16];
         let mut collision_free = true;
         for &key in &unique_probe[..unique_probe_len] {
             let slot = sentinel_hash_1024(key, multiplier);
-            if occupied[slot] {
+            let word_idx = slot >> 6;
+            let mask = 1_u64 << (slot & 63);
+            if (occupied_bits[word_idx] & mask) != 0 {
                 collision_free = false;
                 break;
             }
-            occupied[slot] = true;
+            occupied_bits[word_idx] |= mask;
         }
         if collision_free {
             chosen_multiplier = multiplier;
@@ -385,13 +395,15 @@ pub(crate) fn try_sentinel_hash_aggregation_generic<T: LatticeKey32>(
     let mut keys = [sentinel_zero; 1024];
     keys[home_slot_zero] = sentinel_alt;
     let mut counts = [0_u32; 1024];
-    let mut used = [false; 1024];
+    let mut used_bits = [0_u64; 16];
     let mut unique_count = 0_usize;
 
     for &key in &unique_probe[..unique_probe_len] {
-        let slot = sentinel_hash_1024(key, chosen_multiplier);
-        if !used[slot] {
-            used[slot] = true;
+        let slot = sentinel_hash_1024(key, multiplier_or_default(chosen_multiplier));
+        let word_idx = slot >> 6;
+        let mask = 1_u64 << (slot & 63);
+        if (used_bits[word_idx] & mask) == 0 {
+            used_bits[word_idx] |= mask;
             keys[slot] = key;
             unique_count += 1;
         }
@@ -405,14 +417,16 @@ pub(crate) fn try_sentinel_hash_aggregation_generic<T: LatticeKey32>(
         } else {
             let mut slot = home_slot;
             loop {
-                if !used[slot] {
+                let word_idx = slot >> 6;
+                let mask = 1_u64 << (slot & 63);
+                if (used_bits[word_idx] & mask) == 0 {
                     if unique_count >= 384 {
                         return HashAggregationOutcome {
                             sorted: false,
                             span_exceeds_horizon,
                         };
                     }
-                    used[slot] = true;
+                    used_bits[word_idx] |= mask;
                     keys[slot] = val;
                     counts[slot] = 1;
                     unique_count += 1;
@@ -427,37 +441,87 @@ pub(crate) fn try_sentinel_hash_aggregation_generic<T: LatticeKey32>(
         }
     }
 
-    let mut entries = [KeyCount32 { key: 0, count: 0 }; 384];
-    let mut entry_count = 0_usize;
-    for slot in 0..1024 {
-        if used[slot] && counts[slot] > 0 {
-            entries[entry_count] = KeyCount32 {
-                key: keys[slot],
-                count: counts[slot] as usize,
-            };
-            entry_count += 1;
+    if len <= u32::MAX as usize {
+        let mut packed_entries = [0_u64; 384];
+        let mut entry_count = 0_usize;
+        for (word_idx, &word) in used_bits.iter().enumerate() {
+            let mut bits = word;
+            let base_slot = word_idx << 6;
+            while bits != 0 {
+                let slot = base_slot + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let c = counts[slot];
+                if c > 0 {
+                    let ordered_key = (keys[slot] as u32) ^ 0x8000_0000;
+                    packed_entries[entry_count] = (u64::from(ordered_key) << 32) | u64::from(c);
+                    entry_count += 1;
+                }
+            }
+        }
+
+        for i in 1..entry_count {
+            let current = packed_entries[i];
+            let mut j = i;
+            while j > 0 && packed_entries[j - 1] > current {
+                packed_entries[j] = packed_entries[j - 1];
+                j -= 1;
+            }
+            packed_entries[j] = current;
+        }
+
+        let mut offset = 0_usize;
+        for &packed in &packed_entries[..entry_count] {
+            let key = (((packed >> 32) as u32) ^ 0x8000_0000) as i32;
+            let count = (packed as u32) as usize;
+            slice[offset..offset + count].fill(T::from_key(key));
+            offset += count;
+        }
+    } else {
+        let mut entries = [KeyCount32 { key: 0, count: 0 }; 384];
+        let mut entry_count = 0_usize;
+        for (word_idx, &word) in used_bits.iter().enumerate() {
+            let mut bits = word;
+            let base_slot = word_idx << 6;
+            while bits != 0 {
+                let slot = base_slot + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let c = counts[slot];
+                if c > 0 {
+                    entries[entry_count] = KeyCount32 {
+                        key: keys[slot],
+                        count: c as usize,
+                    };
+                    entry_count += 1;
+                }
+            }
+        }
+
+        for i in 1..entry_count {
+            let current = entries[i];
+            let mut j = i;
+            while j > 0 && entries[j - 1].key > current.key {
+                entries[j] = entries[j - 1];
+                j -= 1;
+            }
+            entries[j] = current;
+        }
+
+        let mut offset = 0_usize;
+        for entry in &entries[..entry_count] {
+            slice[offset..offset + entry.count].fill(T::from_key(entry.key));
+            offset += entry.count;
         }
     }
 
-    for i in 1..entry_count {
-        let current = entries[i];
-        let mut j = i;
-        while j > 0 && entries[j - 1].key > current.key {
-            entries[j] = entries[j - 1];
-            j -= 1;
-        }
-        entries[j] = current;
-    }
-
-    let mut offset = 0_usize;
-    for entry in &entries[..entry_count] {
-        slice[offset..offset + entry.count].fill(T::from_key(entry.key));
-        offset += entry.count;
-    }
     HashAggregationOutcome {
         sorted: true,
         span_exceeds_horizon,
     }
+}
+
+#[inline(always)]
+const fn multiplier_or_default(multiplier: u32) -> u32 {
+    multiplier
 }
 
 /// Attempts to sort `slice` using a stack-allocated 1024-slot dual-sentinel hash table

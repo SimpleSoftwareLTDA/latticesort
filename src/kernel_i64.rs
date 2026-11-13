@@ -344,15 +344,17 @@ pub(crate) fn try_sentinel_hash_aggregation_64<T: LatticeKey64>(
 
     let mut chosen_multiplier = SENTINEL_HASH_MULTIPLIERS_64[0];
     for &multiplier in &SENTINEL_HASH_MULTIPLIERS_64 {
-        let mut occupied = [false; 1024];
+        let mut occupied_bits = [0_u64; 16];
         let mut collision_free = true;
         for &key in &unique_probe[..unique_probe_len] {
             let slot = sentinel_hash_64(key, multiplier);
-            if occupied[slot] {
+            let word_idx = slot >> 6;
+            let mask = 1_u64 << (slot & 63);
+            if (occupied_bits[word_idx] & mask) != 0 {
                 collision_free = false;
                 break;
             }
-            occupied[slot] = true;
+            occupied_bits[word_idx] |= mask;
         }
         if collision_free {
             chosen_multiplier = multiplier;
@@ -370,13 +372,15 @@ pub(crate) fn try_sentinel_hash_aggregation_64<T: LatticeKey64>(
     let mut keys = [sentinel_zero; 1024];
     keys[home_slot_zero] = sentinel_alt;
     let mut counts = [0_u32; 1024];
-    let mut used = [false; 1024];
+    let mut used_bits = [0_u64; 16];
     let mut unique_count = 0_usize;
 
     for &key in &unique_probe[..unique_probe_len] {
         let slot = sentinel_hash_64(key, chosen_multiplier);
-        if !used[slot] {
-            used[slot] = true;
+        let word_idx = slot >> 6;
+        let mask = 1_u64 << (slot & 63);
+        if (used_bits[word_idx] & mask) == 0 {
+            used_bits[word_idx] |= mask;
             keys[slot] = key;
             unique_count += 1;
         }
@@ -390,14 +394,16 @@ pub(crate) fn try_sentinel_hash_aggregation_64<T: LatticeKey64>(
         } else {
             let mut slot = home_slot;
             loop {
-                if !used[slot] {
+                let word_idx = slot >> 6;
+                let mask = 1_u64 << (slot & 63);
+                if (used_bits[word_idx] & mask) == 0 {
                     if unique_count >= 384 {
                         return HashAggregationOutcome {
                             sorted: false,
                             span_exceeds_horizon,
                         };
                     }
-                    used[slot] = true;
+                    used_bits[word_idx] |= mask;
                     keys[slot] = val;
                     counts[slot] = 1;
                     unique_count += 1;
@@ -414,13 +420,20 @@ pub(crate) fn try_sentinel_hash_aggregation_64<T: LatticeKey64>(
 
     let mut entries = [KeyCount64 { key: 0, count: 0 }; 384];
     let mut entry_count = 0_usize;
-    for slot in 0..1024 {
-        if used[slot] && counts[slot] > 0 {
-            entries[entry_count] = KeyCount64 {
-                key: keys[slot],
-                count: counts[slot] as usize,
-            };
-            entry_count += 1;
+    for (word_idx, &word) in used_bits.iter().enumerate() {
+        let mut bits = word;
+        let base_slot = word_idx << 6;
+        while bits != 0 {
+            let slot = base_slot + bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let c = counts[slot];
+            if c > 0 {
+                entries[entry_count] = KeyCount64 {
+                    key: keys[slot],
+                    count: c as usize,
+                };
+                entry_count += 1;
+            }
         }
     }
 
