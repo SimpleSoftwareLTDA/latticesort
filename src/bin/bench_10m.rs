@@ -1,9 +1,13 @@
-#[path = "../candidate.rs"]
-mod candidate;
-#[path = "../harness.rs"]
-mod harness;
+//! 10x scale benchmark and red-team adversarial suite at $N = 10{,}000{,}000$.
 
+use latticesort::{candidate, harness};
 use std::time::Instant;
+
+struct AdversarialAttack {
+    label: &'static str,
+    values: Vec<i32>,
+    trials: usize,
+}
 
 fn measure_median_ms(base: &[i32], buf: &mut [i32], sort_fn: fn(&mut [i32]), trials: usize) -> f64 {
     let mut times = Vec::with_capacity(trials);
@@ -20,7 +24,7 @@ fn measure_median_ms(base: &[i32], buf: &mut [i32], sort_fn: fn(&mut [i32]), tri
 fn make_iceberg_attack(n: usize) -> Vec<i32> {
     let mut out = vec![0_i32; n];
     let tail_start = (n * 95) / 100;
-    let mut seed: u32 = 0xDEAD_BEEF;
+    let mut seed: u32 = 0xdead_beef;
     for slot in &mut out[tail_start..] {
         seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         *slot = seed as i32;
@@ -30,15 +34,15 @@ fn make_iceberg_attack(n: usize) -> Vec<i32> {
 
 fn make_mid_entropy_trap(n: usize) -> Vec<i32> {
     let mut out = Vec::with_capacity(n);
-    let mut seed: u32 = 0xCAFE_BABE;
+    let mut seed: u32 = 0xcafe_babe;
     for i in 0..n {
         seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        let k = if i > (n * 45) / 100 && i < (n * 65) / 100 {
+        let key = if i > (n * 45) / 100 && i < (n * 65) / 100 {
             (seed % 200) as i32
         } else {
             (seed % 10) as i32
         };
-        out.push((k - 100).wrapping_mul(15_000_000));
+        out.push((key - 100).wrapping_mul(15_000_000));
     }
     out
 }
@@ -47,20 +51,20 @@ fn make_sentinel_torture(n: usize) -> Vec<i32> {
     let mut out = Vec::with_capacity(n);
     let target_slot = {
         let u = 0_u32;
-        (((u ^ (u >> 15)).wrapping_mul(0x9E37_79B9)) >> 23) as usize
+        (((u ^ (u >> 15)).wrapping_mul(0x9e37_79b9)) >> 23) as usize
     };
     let mut colliding_keys = vec![0_i32, 1_i32, -1_i32, i32::MIN, i32::MAX];
     let mut candidate_val = 2_i32;
     while colliding_keys.len() < 24 {
         let u = candidate_val as u32;
-        let s = (((u ^ (u >> 15)).wrapping_mul(0x9E37_79B9)) >> 23) as usize;
-        if s == target_slot {
+        let slot = (((u ^ (u >> 15)).wrapping_mul(0x9e37_79b9)) >> 23) as usize;
+        if slot == target_slot {
             colliding_keys.push(candidate_val);
         }
         candidate_val += 1;
     }
 
-    let mut seed: u32 = 424242;
+    let mut seed: u32 = 424_242;
     for i in 0..n {
         let step = n / 128;
         if i % step == 0 {
@@ -75,7 +79,9 @@ fn make_sentinel_torture(n: usize) -> Vec<i32> {
 }
 
 fn make_midpoint_single_swap(n: usize) -> Vec<i32> {
-    let mut out: Vec<i32> = (0..n).map(|i| (i as i32 - 5_000_000).wrapping_mul(200)).collect();
+    let mut out: Vec<i32> = (0..n)
+        .map(|i| (i as i32 - 5_000_000).wrapping_mul(200))
+        .collect();
     out.swap(n / 2 - 2, n / 2 - 1);
     out
 }
@@ -110,8 +116,8 @@ fn make_sparse_barycentric_150(n: usize) -> Vec<i32> {
     let mut seed: u32 = 777_777;
     for _ in 0..n {
         seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        let k = (seed % 150) as i32;
-        out.push((k * 1_000_000) / 149);
+        let key = (seed % 150) as i32;
+        out.push((key * 1_000_000) / 149);
     }
     out
 }
@@ -133,16 +139,16 @@ fn make_exact_golden_stride_spoof(n: usize) -> Vec<i32> {
 fn main() {
     let n = 10_000_000;
     println!("=== 1. MAIN AUTORESEARCH SUITE AT 10x SCALE (N = {n}) ===");
-    let report = harness::evaluate_candidate(candidate::candidate_sort, n);
+    let report = harness::evaluate_candidate(candidate::lattice_sort_i32, n);
     println!(
         "{:<28} | {:>12} | {:>12} | {:>10}",
-        "Dataset", "Cand (ms)", "Std (ms)", "Speedup"
+        "Dataset", "Lattice (ms)", "Std (ms)", "Speedup"
     );
     println!("{}", "-".repeat(70));
-    for c in &report.cases {
+    for case in &report.cases {
         println!(
             "{:<28} | {:>12.2} | {:>12.2} | {:>9.2}x",
-            c.label, c.candidate_ms, c.std_ms, c.speedup
+            case.label, case.candidate_ms, case.std_ms, case.speedup
         );
     }
     println!("{}", "-".repeat(70));
@@ -155,41 +161,92 @@ fn main() {
     );
 
     println!("\n=== 2. RED-TEAM ADVERSARIAL SUITE AT 10x SCALE (N = {n}) ===");
-    let attacks: Vec<(&str, Vec<i32>, usize)> = vec![
-        ("1A. Iceberg Attack (95% const + 5% rand)", make_iceberg_attack(n), 3),
-        ("1B. Mid-Array Entropy Trap (abort @ 50%)", make_mid_entropy_trap(n), 3),
-        ("1C. Sentinel & Hash Collision Torture", make_sentinel_torture(n), 3),
-        ("2A. 10x Cutoff Boundary (N = 6,000 uniform)", harness::make_uniform_random(6_000), 21),
-        ("2B. Mid-Point Single Swap (swap near n/2)", make_midpoint_single_swap(n), 3),
-        ("3A. Fake Soliton (92% ramp + noise tail)", make_fake_soliton(n), 3),
-        ("3B. Valley Soliton (U-shape trough->crest)", make_valley_soliton(n), 3),
-        ("4A. Sparse Barycentric (K=150, span 10^6)", make_sparse_barycentric_150(n), 3),
-        ("4B. Exact Golden-Stride Probe Spoof", make_exact_golden_stride_spoof(n), 3),
+    let attacks: Vec<AdversarialAttack> = vec![
+        AdversarialAttack {
+            label: "1A. Iceberg Attack (95% const + 5% rand)",
+            values: make_iceberg_attack(n),
+            trials: 3,
+        },
+        AdversarialAttack {
+            label: "1B. Mid-Array Entropy Trap (abort @ 50%)",
+            values: make_mid_entropy_trap(n),
+            trials: 3,
+        },
+        AdversarialAttack {
+            label: "1C. Sentinel & Hash Collision Torture",
+            values: make_sentinel_torture(n),
+            trials: 3,
+        },
+        AdversarialAttack {
+            label: "2A. 10x Cutoff Boundary (N = 6,000 uniform)",
+            values: harness::make_uniform_random(6_000),
+            trials: 21,
+        },
+        AdversarialAttack {
+            label: "2B. Mid-Point Single Swap (swap near n/2)",
+            values: make_midpoint_single_swap(n),
+            trials: 3,
+        },
+        AdversarialAttack {
+            label: "3A. Fake Soliton (92% ramp + noise tail)",
+            values: make_fake_soliton(n),
+            trials: 3,
+        },
+        AdversarialAttack {
+            label: "3B. Valley Soliton (U-shape trough->crest)",
+            values: make_valley_soliton(n),
+            trials: 3,
+        },
+        AdversarialAttack {
+            label: "4A. Sparse Barycentric (K=150, span 10^6)",
+            values: make_sparse_barycentric_150(n),
+            trials: 3,
+        },
+        AdversarialAttack {
+            label: "4B. Exact Golden-Stride Probe Spoof",
+            values: make_exact_golden_stride_spoof(n),
+            trials: 3,
+        },
     ];
 
     println!(
         "{:<43} | {:>12} | {:>12} | {:>9} | {:>9}",
-        "Adversarial Attack (10M)", "Cand (ms)", "Std (ms)", "Ratio", "Verdict"
+        "Adversarial Attack (10M)", "Lattice (ms)", "Std (ms)", "Ratio", "Verdict"
     );
     println!("{}", "-".repeat(95));
 
-    for (label, data, trials) in &attacks {
-        let mut work_cand = vec![0_i32; data.len()];
-        let mut work_std = vec![0_i32; data.len()];
+    for attack in &attacks {
+        let mut work_candidate = vec![0_i32; attack.values.len()];
+        let mut work_std = vec![0_i32; attack.values.len()];
 
-        let std_ms = measure_median_ms(data, &mut work_std, <[i32]>::sort_unstable, *trials);
-        let cand_ms = measure_median_ms(data, &mut work_cand, candidate::candidate_sort, *trials);
-
-        assert_eq!(
-            work_cand, work_std,
-            "CORRUPTION DETECTED on 10M adversarial attack: {label}"
+        let std_ms = measure_median_ms(
+            &attack.values,
+            &mut work_std,
+            <[i32]>::sort_unstable,
+            attack.trials,
+        );
+        let candidate_ms = measure_median_ms(
+            &attack.values,
+            &mut work_candidate,
+            candidate::lattice_sort_i32,
+            attack.trials,
         );
 
-        let ratio = std_ms / cand_ms;
-        let verdict = if ratio >= 1.0 { "SURVIVED" } else { "FALSIFIED" };
+        assert_eq!(
+            work_candidate, work_std,
+            "Corruption detected on 10M adversarial attack: {}",
+            attack.label
+        );
+
+        let ratio = std_ms / candidate_ms;
+        let verdict = if ratio >= 1.0 {
+            "SURVIVED"
+        } else {
+            "FALSIFIED"
+        };
         println!(
             "{:<43} | {:>12.3} | {:>12.3} | {:>8.2}x | {:>9}",
-            label, cand_ms, std_ms, ratio, verdict
+            attack.label, candidate_ms, std_ms, ratio, verdict
         );
     }
 }

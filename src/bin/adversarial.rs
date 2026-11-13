@@ -1,7 +1,13 @@
-#[path = "../candidate.rs"]
-mod candidate;
+//! Red-team adversarial falsification suite at $N = 1{,}000{,}000$.
 
+use latticesort::candidate;
 use std::time::Instant;
+
+struct AdversarialAttack {
+    label: &'static str,
+    values: Vec<i32>,
+    trials: usize,
+}
 
 fn measure_median_us(base: &[i32], buf: &mut [i32], sort_fn: fn(&mut [i32]), trials: usize) -> f64 {
     let mut times = Vec::with_capacity(trials);
@@ -15,11 +21,10 @@ fn measure_median_us(base: &[i32], buf: &mut [i32], sort_fn: fn(&mut [i32]), tri
     times[trials / 2]
 }
 
-/// 1A. Iceberg Attack (95% constant 0 + 5% random 32-bit tail).
 fn make_iceberg_attack(n: usize) -> Vec<i32> {
     let mut out = vec![0_i32; n];
     let tail_start = (n * 95) / 100;
-    let mut seed: u32 = 0xDEAD_BEEF;
+    let mut seed: u32 = 0xdead_beef;
     for slot in &mut out[tail_start..] {
         seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         *slot = seed as i32;
@@ -27,42 +32,39 @@ fn make_iceberg_attack(n: usize) -> Vec<i32> {
     out
 }
 
-/// 1B. Mid-Array Entropy Trap: first 45% has 15 keys, middle 20% has 150 keys (triggers abort
-/// at ~55% of the scan after wasting 500,000 hash lookups!), last 35% has 15 keys.
 fn make_mid_entropy_trap(n: usize) -> Vec<i32> {
     let mut out = Vec::with_capacity(n);
-    let mut seed: u32 = 0xCAFE_BABE;
+    let mut seed: u32 = 0xcafe_babe;
     for i in 0..n {
         seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        let k = if i > (n * 45) / 100 && i < (n * 65) / 100 {
+        let key = if i > (n * 45) / 100 && i < (n * 65) / 100 {
             (seed % 200) as i32
         } else {
             (seed % 10) as i32
         };
-        out.push((k - 100).wrapping_mul(15_000_000));
+        out.push((key - 100).wrapping_mul(15_000_000));
     }
     out
 }
 
-/// 1C. Sentinel Value & Hash Collision Torture (0, 1, -1, i32::MIN, i32::MAX + 19 colliding keys).
 fn make_sentinel_torture(n: usize) -> Vec<i32> {
     let mut out = Vec::with_capacity(n);
     let target_slot = {
         let u = 0_u32;
-        (((u ^ (u >> 15)).wrapping_mul(0x9E37_79B9)) >> 23) as usize
+        (((u ^ (u >> 15)).wrapping_mul(0x9e37_79b9)) >> 23) as usize
     };
     let mut colliding_keys = vec![0_i32, 1_i32, -1_i32, i32::MIN, i32::MAX];
     let mut candidate_val = 2_i32;
     while colliding_keys.len() < 24 {
         let u = candidate_val as u32;
-        let s = (((u ^ (u >> 15)).wrapping_mul(0x9E37_79B9)) >> 23) as usize;
-        if s == target_slot {
+        let slot = (((u ^ (u >> 15)).wrapping_mul(0x9e37_79b9)) >> 23) as usize;
+        if slot == target_slot {
             colliding_keys.push(candidate_val);
         }
         candidate_val += 1;
     }
 
-    let mut seed: u32 = 424242;
+    let mut seed: u32 = 424_242;
     for i in 0..n {
         let step = n / 128;
         if i % step == 0 {
@@ -76,8 +78,6 @@ fn make_sentinel_torture(n: usize) -> Vec<i32> {
     out
 }
 
-/// 2A. Cutoff Boundary Attack (N = 600, just above the 512 cutoff where 4x256 radix histograms
-/// pay fixed 1024-counter overhead on only 600 elements).
 fn make_cutoff_boundary(n: usize) -> Vec<i32> {
     let mut out = Vec::with_capacity(n);
     let mut seed: u32 = 314_159_265;
@@ -88,16 +88,14 @@ fn make_cutoff_boundary(n: usize) -> Vec<i32> {
     out
 }
 
-/// 2B. Mid-Point Single Swap (`swap(n/2, n/2 + 1)` on an otherwise sorted wide array).
-/// Defeats Soliton (peak = 50% < 75%), Nucleation, and Barycentric, while `std::sort_unstable`
-/// detects that both partitions around the median are already sorted!
 fn make_midpoint_single_swap(n: usize) -> Vec<i32> {
-    let mut out: Vec<i32> = (0..n).map(|i| (i as i32 - 500_000).wrapping_mul(1000)).collect();
+    let mut out: Vec<i32> = (0..n)
+        .map(|i| (i as i32 - 500_000).wrapping_mul(1000))
+        .collect();
     out.swap(n / 2 - 2, n / 2 - 1);
     out
 }
 
-/// 3A. Fake Soliton (92% ascending ramp, then oscillating tail).
 fn make_fake_soliton(n: usize) -> Vec<i32> {
     let mut out = Vec::with_capacity(n);
     let cutoff = (n * 92) / 100;
@@ -111,7 +109,6 @@ fn make_fake_soliton(n: usize) -> Vec<i32> {
     out
 }
 
-/// 3B. Valley Soliton (U-shape: descending first half, ascending second half).
 fn make_valley_soliton(n: usize) -> Vec<i32> {
     let mut out = Vec::with_capacity(n);
     let half = n / 2;
@@ -124,20 +121,17 @@ fn make_valley_soliton(n: usize) -> Vec<i32> {
     out
 }
 
-/// 4A. Sparse Barycentric Horizon (K=150 > 128 crystal limit, span = 1,000,000).
 fn make_sparse_barycentric_150(n: usize) -> Vec<i32> {
     let mut out = Vec::with_capacity(n);
     let mut seed: u32 = 777_777;
     for _ in 0..n {
         seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        let k = (seed % 150) as i32;
-        out.push((k * 1_000_000) / 149);
+        let key = (seed % 150) as i32;
+        out.push((key * 1_000_000) / 149);
     }
     out
 }
 
-/// 4B.Exact Golden-Stride Spoof: plants constant 0 at the exact 96 golden-stride indices AND
-/// the 32 tail indices probed by `try_phyllotaxis_nucleation`, while all other elements are random!
 fn make_exact_golden_stride_spoof(n: usize) -> Vec<i32> {
     let mut out = make_cutoff_boundary(n);
     let stride = ((n as u64 * 2_654_435_761) >> 32).max(1) as usize | 1;
@@ -154,42 +148,93 @@ fn make_exact_golden_stride_spoof(n: usize) -> Vec<i32> {
 
 fn main() {
     let n = 1_000_000;
-    let attacks: Vec<(&str, Vec<i32>, usize)> = vec![
-        ("1A. Iceberg Attack (95% const + 5% rand)", make_iceberg_attack(n), 3),
-        ("1B. Mid-Array Entropy Trap (abort @ 50%)", make_mid_entropy_trap(n), 3),
-        ("1C. Sentinel & Hash Collision Torture", make_sentinel_torture(n), 3),
-        ("2A. Cutoff Boundary (N = 600 uniform)", make_cutoff_boundary(600), 51),
-        ("2B. Mid-Point Single Swap (swap near n/2)", make_midpoint_single_swap(n), 3),
-        ("3A. Fake Soliton (92% ramp + noise tail)", make_fake_soliton(n), 3),
-        ("3B. Valley Soliton (U-shape trough->crest)", make_valley_soliton(n), 3),
-        ("4A. Sparse Barycentric (K=150, span 10^6)", make_sparse_barycentric_150(n), 3),
-        ("4B. Exact Golden-Stride Probe Spoof", make_exact_golden_stride_spoof(n), 3),
+    let attacks: Vec<AdversarialAttack> = vec![
+        AdversarialAttack {
+            label: "1A. Iceberg Attack (95% const + 5% rand)",
+            values: make_iceberg_attack(n),
+            trials: 3,
+        },
+        AdversarialAttack {
+            label: "1B. Mid-Array Entropy Trap (abort @ 50%)",
+            values: make_mid_entropy_trap(n),
+            trials: 3,
+        },
+        AdversarialAttack {
+            label: "1C. Sentinel & Hash Collision Torture",
+            values: make_sentinel_torture(n),
+            trials: 3,
+        },
+        AdversarialAttack {
+            label: "2A. Cutoff Boundary (N = 600 uniform)",
+            values: make_cutoff_boundary(600),
+            trials: 51,
+        },
+        AdversarialAttack {
+            label: "2B. Mid-Point Single Swap (swap near n/2)",
+            values: make_midpoint_single_swap(n),
+            trials: 3,
+        },
+        AdversarialAttack {
+            label: "3A. Fake Soliton (92% ramp + noise tail)",
+            values: make_fake_soliton(n),
+            trials: 3,
+        },
+        AdversarialAttack {
+            label: "3B. Valley Soliton (U-shape trough->crest)",
+            values: make_valley_soliton(n),
+            trials: 3,
+        },
+        AdversarialAttack {
+            label: "4A. Sparse Barycentric (K=150, span 10^6)",
+            values: make_sparse_barycentric_150(n),
+            trials: 3,
+        },
+        AdversarialAttack {
+            label: "4B. Exact Golden-Stride Probe Spoof",
+            values: make_exact_golden_stride_spoof(n),
+            trials: 3,
+        },
     ];
 
     println!("=== RED-TEAM FALSIFICATION SUITE (ADVERSARIAL TESTS) ===");
     println!(
         "{:<43} | {:>12} | {:>12} | {:>9} | {:>9}",
-        "Adversarial Attack", "Cand (us)", "Std (us)", "Ratio", "Verdict"
+        "Adversarial Attack", "Lattice (us)", "Std (us)", "Ratio", "Verdict"
     );
     println!("{}", "-".repeat(95));
 
-    for (label, data, trials) in &attacks {
-        let mut work_cand = vec![0_i32; data.len()];
-        let mut work_std = vec![0_i32; data.len()];
+    for attack in &attacks {
+        let mut work_candidate = vec![0_i32; attack.values.len()];
+        let mut work_std = vec![0_i32; attack.values.len()];
 
-        let std_us = measure_median_us(data, &mut work_std, <[i32]>::sort_unstable, *trials);
-        let cand_us = measure_median_us(data, &mut work_cand, candidate::candidate_sort, *trials);
-
-        assert_eq!(
-            work_cand, work_std,
-            "CORRUPTION DETECTED on adversarial attack: {label}"
+        let std_us = measure_median_us(
+            &attack.values,
+            &mut work_std,
+            <[i32]>::sort_unstable,
+            attack.trials,
+        );
+        let candidate_us = measure_median_us(
+            &attack.values,
+            &mut work_candidate,
+            candidate::lattice_sort_i32,
+            attack.trials,
         );
 
-        let ratio = std_us / cand_us;
-        let verdict = if ratio >= 1.0 { "SURVIVED" } else { "FALSIFIED" };
+        assert_eq!(
+            work_candidate, work_std,
+            "Corruption detected on adversarial attack: {}",
+            attack.label
+        );
+
+        let ratio = std_us / candidate_us;
+        let verdict = if ratio >= 1.0 {
+            "SURVIVED"
+        } else {
+            "FALSIFIED"
+        };
         println!(
             "{:<43} | {:>12.1} | {:>12.1} | {:>8.2}x | {:>9}",
-            label, cand_us, std_us, ratio, verdict
+            attack.label, candidate_us, std_us, ratio, verdict
         );
     }
 }

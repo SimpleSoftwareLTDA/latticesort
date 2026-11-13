@@ -1,7 +1,24 @@
-use latticesort::{LatticeSort, candidate, par_lattice_sort};
+//! Benchmarks for polymorphic `LatticeSortExt` (`u32`, `i64`, `u64`, `f32`, `f64`) and
+//! multi-core `parallel::parallel_lattice_sort`.
+
+use latticesort::{LatticeSortExt, candidate, parallel};
 use std::time::Instant;
 
-fn median_ms<T: Clone, F: FnMut(&mut [T])>(base: &[T], mut sort_fn: F, trials: usize) -> (f64, Vec<T>) {
+struct MedianBenchmarkResult<T> {
+    median_ms: f64,
+    sorted_output: Vec<T>,
+}
+
+struct ParallelScenario {
+    label: &'static str,
+    size: usize,
+}
+
+fn median_ms<T: Clone, F: FnMut(&mut [T])>(
+    base: &[T],
+    mut sort_fn: F,
+    trials: usize,
+) -> MedianBenchmarkResult<T> {
     let mut times = Vec::with_capacity(trials);
     let mut work = base.to_vec();
     for _ in 0..trials {
@@ -11,12 +28,15 @@ fn median_ms<T: Clone, F: FnMut(&mut [T])>(base: &[T], mut sort_fn: F, trials: u
         times.push(t0.elapsed().as_secs_f64() * 1000.0);
     }
     times.sort_by(|a, b| a.total_cmp(b));
-    (times[trials / 2], work)
+    MedianBenchmarkResult {
+        median_ms: times[trials / 2],
+        sorted_output: work,
+    }
 }
 
 fn main() {
     let n = 1_000_000;
-    println!("=== ETAPA 3: GENERALIZACAO DE TIPOS (LatticeSort Trait, N = {n}) ===");
+    println!("=== ETAPA 3: GENERALIZACAO DE TIPOS (LatticeSortExt Trait, N = {n}) ===");
     println!(
         "{:<34} | {:>12} | {:>12} | {:>9} | {:>6}",
         "Tipo e Distribuicao", "Lattice (ms)", "Std (ms)", "Speedup", "OK"
@@ -32,20 +52,24 @@ fn main() {
                 seed
             })
             .collect();
-        let (std_ms, exp) = median_ms(&data, <[u32]>::sort_unstable, 3);
-        let (lat_ms, act) = median_ms(&data, <[u32]>::lattice_sort, 3);
+        let std_res = median_ms(&data, <[u32]>::sort_unstable, 3);
+        let lattice_res = median_ms(&data, <[u32]>::lattice_sort, 3);
+        let matches = lattice_res.sorted_output == std_res.sorted_output;
         println!(
             "{:<34} | {:>12.2} | {:>12.2} | {:>8.2}x | {:>6}",
             "1. u32 (Uniform 32-bit)",
-            lat_ms,
-            std_ms,
-            std_ms / lat_ms,
-            act == exp
+            lattice_res.median_ms,
+            std_res.median_ms,
+            std_res.median_ms / lattice_res.median_ms,
+            matches
         );
-        assert_eq!(act, exp);
+        assert_eq!(
+            lattice_res.sorted_output, std_res.sorted_output,
+            "u32 uniform sorted output must match std::slice::sort_unstable"
+        );
     }
 
-    // 2. i64 Realistic Timestamps (upper 4 bytes constant -> 4 of 8 bytes skipped!)
+    // 2. i64 Realistic Timestamps (upper 4 bytes constant -> 4 of 8 bytes skipped)
     {
         let mut seed = 987_654_321_u64;
         let base_ts: i64 = 1_760_000_000_000;
@@ -55,17 +79,21 @@ fn main() {
                 base_ts + ((seed >> 32) as i64)
             })
             .collect();
-        let (std_ms, exp) = median_ms(&data, <[i64]>::sort_unstable, 3);
-        let (lat_ms, act) = median_ms(&data, <[i64]>::lattice_sort, 3);
+        let std_res = median_ms(&data, <[i64]>::sort_unstable, 3);
+        let lattice_res = median_ms(&data, <[i64]>::lattice_sort, 3);
+        let matches = lattice_res.sorted_output == std_res.sorted_output;
         println!(
             "{:<34} | {:>12.2} | {:>12.2} | {:>8.2}x | {:>6}",
             "2. i64 (Timestamps: 4 bytes skip)",
-            lat_ms,
-            std_ms,
-            std_ms / lat_ms,
-            act == exp
+            lattice_res.median_ms,
+            std_res.median_ms,
+            std_res.median_ms / lattice_res.median_ms,
+            matches
         );
-        assert_eq!(act, exp);
+        assert_eq!(
+            lattice_res.sorted_output, std_res.sorted_output,
+            "i64 timestamp sorted output must match std::slice::sort_unstable"
+        );
     }
 
     // 3. i64 Low Cardinality (K = 50 distinct 64-bit IDs)
@@ -77,17 +105,21 @@ fn main() {
                 ((seed % 50) as i64 - 25).wrapping_mul(100_000_000_000_000)
             })
             .collect();
-        let (std_ms, exp) = median_ms(&data, <[i64]>::sort_unstable, 3);
-        let (lat_ms, act) = median_ms(&data, <[i64]>::lattice_sort, 3);
+        let std_res = median_ms(&data, <[i64]>::sort_unstable, 3);
+        let lattice_res = median_ms(&data, <[i64]>::lattice_sort, 3);
+        let matches = lattice_res.sorted_output == std_res.sorted_output;
         println!(
             "{:<34} | {:>12.2} | {:>12.2} | {:>8.2}x | {:>6}",
             "3. i64 (K=50 IDs 64-bit)",
-            lat_ms,
-            std_ms,
-            std_ms / lat_ms,
-            act == exp
+            lattice_res.median_ms,
+            std_res.median_ms,
+            std_res.median_ms / lattice_res.median_ms,
+            matches
         );
-        assert_eq!(act, exp);
+        assert_eq!(
+            lattice_res.sorted_output, std_res.sorted_output,
+            "i64 low-cardinality sorted output must match std::slice::sort_unstable"
+        );
     }
 
     // 4. u64 Bounded IDs
@@ -96,20 +128,24 @@ fn main() {
         let data: Vec<u64> = (0..n)
             .map(|_| {
                 seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-                seed & 0x0000_0000_FFFF_FFFF
+                seed & 0x0000_0000_ffff_ffff
             })
             .collect();
-        let (std_ms, exp) = median_ms(&data, <[u64]>::sort_unstable, 3);
-        let (lat_ms, act) = median_ms(&data, <[u64]>::lattice_sort, 3);
+        let std_res = median_ms(&data, <[u64]>::sort_unstable, 3);
+        let lattice_res = median_ms(&data, <[u64]>::lattice_sort, 3);
+        let matches = lattice_res.sorted_output == std_res.sorted_output;
         println!(
             "{:<34} | {:>12.2} | {:>12.2} | {:>8.2}x | {:>6}",
             "4. u64 (IDs 32-bit em u64)",
-            lat_ms,
-            std_ms,
-            std_ms / lat_ms,
-            act == exp
+            lattice_res.median_ms,
+            std_res.median_ms,
+            std_res.median_ms / lattice_res.median_ms,
+            matches
         );
-        assert_eq!(act, exp);
+        assert_eq!(
+            lattice_res.sorted_output, std_res.sorted_output,
+            "u64 bounded IDs sorted output must match std::slice::sort_unstable"
+        );
     }
 
     // 5. f32 IEEE-754 floats (positive + negative + zero)
@@ -121,18 +157,25 @@ fn main() {
                 ((seed as i32) as f32) * 0.000_1
             })
             .collect();
-        let (std_ms, exp) = median_ms(&data, |s| s.sort_unstable_by(f32::total_cmp), 3);
-        let (lat_ms, act) = median_ms(&data, <[f32]>::lattice_sort, 3);
-        let eq = act.iter().zip(exp.iter()).all(|(a, b)| a.to_bits() == b.to_bits());
+        let std_res = median_ms(&data, |slice| slice.sort_unstable_by(f32::total_cmp), 3);
+        let lattice_res = median_ms(&data, <[f32]>::lattice_sort, 3);
+        let matches = lattice_res
+            .sorted_output
+            .iter()
+            .zip(std_res.sorted_output.iter())
+            .all(|(a, b)| a.to_bits() == b.to_bits());
         println!(
             "{:<34} | {:>12.2} | {:>12.2} | {:>8.2}x | {:>6}",
             "5. f32 (Ponto Flutuante +/-)",
-            lat_ms,
-            std_ms,
-            std_ms / lat_ms,
-            eq
+            lattice_res.median_ms,
+            std_res.median_ms,
+            std_res.median_ms / lattice_res.median_ms,
+            matches
         );
-        assert!(eq);
+        assert!(
+            matches,
+            "f32 sorted output bit patterns must match f32::total_cmp ordering"
+        );
     }
 
     // 6. f64 IEEE-754 doubles (low-cardinality sensor readings K=64)
@@ -144,50 +187,73 @@ fn main() {
                 f64::from((seed % 64) as i32 - 32) * 1.234_567_89
             })
             .collect();
-        let (std_ms, exp) = median_ms(&data, |s| s.sort_unstable_by(f64::total_cmp), 3);
-        let (lat_ms, act) = median_ms(&data, <[f64]>::lattice_sort, 3);
-        let eq = act.iter().zip(exp.iter()).all(|(a, b)| a.to_bits() == b.to_bits());
+        let std_res = median_ms(&data, |slice| slice.sort_unstable_by(f64::total_cmp), 3);
+        let lattice_res = median_ms(&data, <[f64]>::lattice_sort, 3);
+        let matches = lattice_res
+            .sorted_output
+            .iter()
+            .zip(std_res.sorted_output.iter())
+            .all(|(a, b)| a.to_bits() == b.to_bits());
         println!(
             "{:<34} | {:>12.2} | {:>12.2} | {:>8.2}x | {:>6}",
             "6. f64 (Sensores K=64 +/-)",
-            lat_ms,
-            std_ms,
-            std_ms / lat_ms,
-            eq
+            lattice_res.median_ms,
+            std_res.median_ms,
+            std_res.median_ms / lattice_res.median_ms,
+            matches
         );
-        assert!(eq);
+        assert!(
+            matches,
+            "f64 sorted output bit patterns must match f64::total_cmp ordering"
+        );
     }
 
-    println!("\n=== ETAPA 4: EXECUCAO PARALELA MULTI-CORE (par_lattice_sort) ===");
+    println!("\n=== ETAPA 4: EXECUCAO PARALELA MULTI-CORE (parallel::parallel_lattice_sort) ===");
     println!(
         "{:<34} | {:>12} | {:>12} | {:>12} | {:>10}",
         "Cenario Uniform 32-bit", "Par (ms)", "1-Thr (ms)", "Std (ms)", "Par vs Std"
     );
     println!("{}", "-".repeat(90));
 
-    for &(label, size) in &[
-        ("Uniform 32-bit (N = 1,000,000)", 1_000_000_usize),
-        ("Uniform 32-bit (N = 10,000,000)", 10_000_000_usize),
-    ] {
+    let scenarios = [
+        ParallelScenario {
+            label: "Uniform 32-bit (N = 1,000,000)",
+            size: 1_000_000,
+        },
+        ParallelScenario {
+            label: "Uniform 32-bit (N = 10,000,000)",
+            size: 10_000_000,
+        },
+    ];
+
+    for scenario in &scenarios {
         let mut seed = 314_159_265_u32;
-        let data: Vec<i32> = (0..size)
+        let data: Vec<i32> = (0..scenario.size)
             .map(|_| {
                 seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                 seed as i32
             })
             .collect();
-        let (std_ms, exp) = median_ms(&data, <[i32]>::sort_unstable, 3);
-        let (seq_ms, seq_act) = median_ms(&data, candidate::lattice_sort_i32, 3);
-        let (par_ms, par_act) = median_ms(&data, par_lattice_sort, 3);
-        assert_eq!(seq_act, exp);
-        assert_eq!(par_act, exp);
+        let std_res = median_ms(&data, <[i32]>::sort_unstable, 3);
+        let sequential_res = median_ms(&data, candidate::lattice_sort_i32, 3);
+        let parallel_res = median_ms(&data, parallel::parallel_lattice_sort, 3);
+        assert_eq!(
+            sequential_res.sorted_output, std_res.sorted_output,
+            "Sequential lattice_sort_i32 output must match std::slice::sort_unstable on {}",
+            scenario.label
+        );
+        assert_eq!(
+            parallel_res.sorted_output, std_res.sorted_output,
+            "Parallel parallel_lattice_sort output must match std::slice::sort_unstable on {}",
+            scenario.label
+        );
         println!(
             "{:<34} | {:>12.2} | {:>12.2} | {:>12.2} | {:>9.2}x",
-            label,
-            par_ms,
-            seq_ms,
-            std_ms,
-            std_ms / par_ms
+            scenario.label,
+            parallel_res.median_ms,
+            sequential_res.median_ms,
+            std_res.median_ms,
+            std_res.median_ms / parallel_res.median_ms
         );
     }
 }

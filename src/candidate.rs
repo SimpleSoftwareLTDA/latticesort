@@ -1,20 +1,37 @@
-// LatticeSort 32-bit Core Kernel:
-// 1. `try_bitonic_run_merge`: O(n) single-pass merge for ascending/descending/bitonic runs and long sorted prefixes
-// 2. `try_sentinel_hash_aggregation`: 1024-slot L1 dual-sentinel direct-mapped hash aggregation (up to 384 distinct keys)
-// 3. `try_dense_range_count`: offset counting sort when value span fits within L2/L3 cache horizon
-// 4. `radix_lsd_fused_sort` & `radix_msb_l2_hybrid_sort`: 4x8-bit fused-histogram radix sort with degenerate-byte skipping
+//! 32-bit adaptive sorting kernel for `latticesort`.
+//!
+//! Combines four specialized stages:
+//! 1. `try_bitonic_run_merge`: linear-time $O(n)$ run detection and merge for monotonic,
+//!    bitonic, and mostly-sorted inputs.
+//! 2. `try_sentinel_hash_aggregation`: L1-resident 1024-slot dual-sentinel hash table for
+//!    low-cardinality inputs (up to 384 distinct keys).
+//! 3. `try_dense_range_count`: offset counting sort when the key span fits within cache.
+//! 4. `radix_lsd_fused_sort` and `radix_msb_l2_hybrid_sort`: 4-pass 8-bit radix sort with
+//!    single-pass fused histograms and degenerate-byte skipping.
 
 const DENSE_RANGE_MAX_SPAN: u64 = 1_048_576;
 const SMALL_SORT_CUTOFF: usize = 96;
 const STACK_SCRATCH_MAX: usize = 2048;
 const MSB_L2_PARTITION_THRESHOLD: usize = 1_500_000;
 
-const SENTINEL_HASH_MULTS_32: [u32; 4] = [
-    0x9E37_79B9,
-    0x85EB_CA6B,
-    0xC2B2_AE35,
-    0x27D4_EB2F,
-];
+const SENTINEL_HASH_MULTIPLIERS_32: [u32; 4] = [0x9e37_79b9, 0x85eb_ca6b, 0xc2b2_ae35, 0x27d4_eb2f];
+
+/// Outcome of the dual-sentinel L1 hash aggregation probe and pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[must_use]
+pub struct HashAggregationOutcome {
+    /// Whether the slice was completely sorted by the hash aggregation pass.
+    pub sorted: bool,
+    /// Whether the sampled value span exceeds the dense range counting horizon.
+    pub span_exceeds_horizon: bool,
+}
+
+#[derive(Clone, Copy)]
+struct KeyCount32 {
+    key: i32,
+    count: usize,
+}
 
 fn insertion_sort(slice: &mut [i32]) {
     for i in 1..slice.len() {
@@ -70,22 +87,22 @@ fn merge_sorted_halves(slice: &mut [i32], split: usize) {
     if slice[split - 1] <= slice[split] {
         return;
     }
-    let c = slice[0];
-    if c == slice[split - 1] {
-        let p = slice[split..].partition_point(|&x| x < c);
-        slice.copy_within(split..split + p, 0);
-        slice[p..split + p].fill(c);
+    let first_val = slice[0];
+    if first_val == slice[split - 1] {
+        let insert_pos = slice[split..].partition_point(|&x| x < first_val);
+        slice.copy_within(split..split + insert_pos, 0);
+        slice[insert_pos..split + insert_pos].fill(first_val);
         return;
     }
 
-    let r0 = slice[split];
-    let trim_left = slice[..split].partition_point(|&x| x <= r0);
+    let right_first = slice[split];
+    let trim_left = slice[..split].partition_point(|&x| x <= right_first);
     let active = &mut slice[trim_left..];
-    let adj_split = split - trim_left;
+    let adjusted_split = split - trim_left;
 
     let len = active.len();
     let mut merged = vec![0_i32; len];
-    let (left, right) = active.split_at(adj_split);
+    let (left, right) = active.split_at(adjusted_split);
     let mut i = 0_usize;
     let mut j = 0_usize;
     let mut k = 0_usize;
@@ -102,15 +119,19 @@ fn merge_sorted_halves(slice: &mut [i32], split: usize) {
         k += 1;
     }
     if i < left.len() {
-        let rem = left.len() - i;
-        merged[k..k + rem].copy_from_slice(&left[i..]);
+        let remaining = left.len() - i;
+        merged[k..k + remaining].copy_from_slice(&left[i..]);
     } else if j < right.len() {
-        let rem = right.len() - j;
-        merged[k..k + rem].copy_from_slice(&right[j..]);
+        let remaining = right.len() - j;
+        merged[k..k + remaining].copy_from_slice(&right[j..]);
     }
     active.copy_from_slice(&merged);
 }
 
+/// Detects and merges monotonic, bitonic, or mostly-sorted runs in linear time.
+///
+/// Returns `true` if the slice was completely sorted by this pass.
+#[must_use]
 pub fn try_bitonic_run_merge(slice: &mut [i32]) -> bool {
     let len = slice.len();
     if len <= SMALL_SORT_CUTOFF {
@@ -193,8 +214,8 @@ pub fn try_bitonic_run_merge(slice: &mut [i32]) -> bool {
             k += 1;
         }
         if i < left.len() {
-            let rem = left.len() - i;
-            merged[k..k + rem].copy_from_slice(&left[i..]);
+            let remaining = left.len() - i;
+            merged[k..k + remaining].copy_from_slice(&left[i..]);
         } else {
             while j > 0 {
                 merged[k] = right[j - 1];
@@ -207,9 +228,9 @@ pub fn try_bitonic_run_merge(slice: &mut [i32]) -> bool {
     }
 
     if peak >= (len * 3) / 4 {
-        let c = slice[0];
-        if slice[peak / 2] == c {
-            while peak > 0 && slice[peak] != c {
+        let first_val = slice[0];
+        if slice[peak / 2] == first_val {
+            while peak > 0 && slice[peak] != first_val {
                 peak -= 1;
             }
         }
@@ -222,35 +243,33 @@ pub fn try_bitonic_run_merge(slice: &mut [i32]) -> bool {
 }
 
 #[inline]
-fn sentinel_hash_1024(val: i32, mult: u32) -> usize {
+fn sentinel_hash_1024(val: i32, multiplier: u32) -> usize {
     let u = val as u32;
-    (((u ^ (u >> 15)).wrapping_mul(mult)) >> 22) as usize
+    (((u ^ (u >> 15)).wrapping_mul(multiplier)) >> 22) as usize
 }
 
-/// Self-verifying dual-sentinel hash aggregation on stack (`1024` slots, up to `384` unique keys).
-/// Returns `(handled, probe_span_exceeds_horizon)`.
-pub fn try_sentinel_hash_aggregation(slice: &mut [i32]) -> (bool, bool) {
+/// Attempts to sort `slice` using a stack-allocated 1024-slot dual-sentinel hash table
+/// when the input contains at most 384 distinct keys.
+pub fn try_sentinel_hash_aggregation(slice: &mut [i32]) -> HashAggregationOutcome {
     let len = slice.len();
     if len <= STACK_SCRATCH_MAX {
-        return (false, true);
+        return HashAggregationOutcome {
+            sorted: false,
+            span_exceeds_horizon: true,
+        };
     }
 
     let mut probe = [0_i32; 128];
-    let anchors = [
-        len / 10,
-        (len * 3) / 10,
-        len / 2,
-        (len * 7) / 10,
-        len - 16,
-    ];
-    for (w, &base) in anchors.iter().enumerate() {
-        let dst_start = w * 16;
+    let anchors = [len / 10, (len * 3) / 10, len / 2, (len * 7) / 10, len - 16];
+    let indexed_anchors = anchors.iter().enumerate();
+    for (window_idx, &base) in indexed_anchors {
+        let dst_start = window_idx * 16;
         probe[dst_start..dst_start + 16].copy_from_slice(&slice[base..base + 16]);
     }
 
     let stride = ((len as u64 * 2_654_435_761) >> 32).max(1) as usize | 1;
     let mut idx = len / 7;
-    for slot in probe.iter_mut().skip(80) {
+    for slot in &mut probe[80..] {
         *slot = slice[idx % len];
         idx = idx.wrapping_add(stride);
     }
@@ -262,67 +281,73 @@ pub fn try_sentinel_hash_aggregation(slice: &mut [i32]) -> (bool, bool) {
 
     let mut unique_probe = [0_i32; 128];
     unique_probe[0] = probe[0];
-    let mut u_len = 1_usize;
+    let mut unique_probe_len = 1_usize;
     for i in 1..128 {
         if probe[i] != probe[i - 1] {
-            if u_len >= 80 {
-                return (false, span_exceeds_horizon);
+            if unique_probe_len >= 80 {
+                return HashAggregationOutcome {
+                    sorted: false,
+                    span_exceeds_horizon,
+                };
             }
-            unique_probe[u_len] = probe[i];
-            u_len += 1;
+            unique_probe[unique_probe_len] = probe[i];
+            unique_probe_len += 1;
         }
     }
 
-    let mut chosen_mult = SENTINEL_HASH_MULTS_32[0];
-    for &m in &SENTINEL_HASH_MULTS_32 {
+    let mut chosen_multiplier = SENTINEL_HASH_MULTIPLIERS_32[0];
+    for &multiplier in &SENTINEL_HASH_MULTIPLIERS_32 {
         let mut occupied = [false; 1024];
-        let mut ok = true;
-        for &k in &unique_probe[..u_len] {
-            let s = sentinel_hash_1024(k, m);
-            if occupied[s] {
-                ok = false;
+        let mut collision_free = true;
+        for &key in &unique_probe[..unique_probe_len] {
+            let slot = sentinel_hash_1024(key, multiplier);
+            if occupied[slot] {
+                collision_free = false;
                 break;
             }
-            occupied[s] = true;
+            occupied[slot] = true;
         }
-        if ok {
-            chosen_mult = m;
+        if collision_free {
+            chosen_multiplier = multiplier;
             break;
         }
     }
 
-    let d0 = 0_i32;
-    let s0 = sentinel_hash_1024(d0, chosen_mult);
-    let mut d1 = 1_i32;
-    while sentinel_hash_1024(d1, chosen_mult) == s0 {
-        d1 += 1;
+    let sentinel_zero = 0_i32;
+    let home_slot_zero = sentinel_hash_1024(sentinel_zero, chosen_multiplier);
+    let mut sentinel_alt = 1_i32;
+    while sentinel_hash_1024(sentinel_alt, chosen_multiplier) == home_slot_zero {
+        sentinel_alt += 1;
     }
 
-    let mut keys = [d0; 1024];
-    keys[s0] = d1;
+    let mut keys = [sentinel_zero; 1024];
+    keys[home_slot_zero] = sentinel_alt;
     let mut counts = [0_u32; 1024];
     let mut used = [false; 1024];
     let mut unique_count = 0_usize;
 
-    for &k in &unique_probe[..u_len] {
-        let s = sentinel_hash_1024(k, chosen_mult);
-        if !used[s] {
-            used[s] = true;
-            keys[s] = k;
+    for &key in &unique_probe[..unique_probe_len] {
+        let slot = sentinel_hash_1024(key, chosen_multiplier);
+        if !used[slot] {
+            used[slot] = true;
+            keys[slot] = key;
             unique_count += 1;
         }
     }
 
     for &val in slice.iter() {
-        let s = sentinel_hash_1024(val, chosen_mult);
-        if keys[s] == val {
-            counts[s] += 1;
+        let home_slot = sentinel_hash_1024(val, chosen_multiplier);
+        if keys[home_slot] == val {
+            counts[home_slot] += 1;
         } else {
-            let mut slot = s;
+            let mut slot = home_slot;
             loop {
                 if !used[slot] {
                     if unique_count >= 384 {
-                        return (false, span_exceeds_horizon);
+                        return HashAggregationOutcome {
+                            sorted: false,
+                            span_exceeds_horizon,
+                        };
                     }
                     used[slot] = true;
                     keys[slot] = val;
@@ -339,33 +364,42 @@ pub fn try_sentinel_hash_aggregation(slice: &mut [i32]) -> (bool, bool) {
         }
     }
 
-    let mut entries = [(0_i32, 0_usize); 384];
-    let mut n_idx = 0_usize;
-    for s in 0..1024 {
-        if used[s] && counts[s] > 0 {
-            entries[n_idx] = (keys[s], counts[s] as usize);
-            n_idx += 1;
+    let mut entries = [KeyCount32 { key: 0, count: 0 }; 384];
+    let mut entry_count = 0_usize;
+    for slot in 0..1024 {
+        if used[slot] && counts[slot] > 0 {
+            entries[entry_count] = KeyCount32 {
+                key: keys[slot],
+                count: counts[slot] as usize,
+            };
+            entry_count += 1;
         }
     }
 
-    for i in 1..n_idx {
-        let key = entries[i];
+    for i in 1..entry_count {
+        let current = entries[i];
         let mut j = i;
-        while j > 0 && entries[j - 1].0 > key.0 {
+        while j > 0 && entries[j - 1].key > current.key {
             entries[j] = entries[j - 1];
             j -= 1;
         }
-        entries[j] = key;
+        entries[j] = current;
     }
 
     let mut offset = 0_usize;
-    for &(val, count) in &entries[..n_idx] {
-        slice[offset..offset + count].fill(val);
-        offset += count;
+    for entry in &entries[..entry_count] {
+        slice[offset..offset + entry.count].fill(entry.key);
+        offset += entry.count;
     }
-    (true, span_exceeds_horizon)
+    HashAggregationOutcome {
+        sorted: true,
+        span_exceeds_horizon,
+    }
 }
 
+/// Attempts to sort `slice` using offset counting sort when the value range `max - min`
+/// fits within the cache-friendly span horizon.
+#[must_use]
 pub fn try_dense_range_count(slice: &mut [i32]) -> bool {
     let len = slice.len();
     if len <= SMALL_SORT_CUTOFF {
@@ -402,45 +436,51 @@ pub fn try_dense_range_count(slice: &mut [i32]) -> bool {
     }
 
     let mut offset = 0_usize;
-    for (idx, &count) in density.iter().enumerate() {
+    let indexed_density = density.iter().enumerate();
+    for (idx, &count) in indexed_density {
         if count > 0 {
             let val = (base + idx as i64) as i32;
-            let c = count as usize;
-            slice[offset..offset + c].fill(val);
-            offset += c;
+            let count_usize = count as usize;
+            slice[offset..offset + count_usize].fill(val);
+            offset += count_usize;
         }
     }
     true
 }
 
+/// Executes a single 8-bit radix scatter pass from `src` into `dst` using precomputed `histogram`.
 #[inline]
 pub fn scatter_pass<const SHIFT: usize, const FLIP_SIGN: bool>(
     src: &[i32],
     dst: &mut [i32],
-    hist: &[u32; 256],
+    histogram: &[u32; 256],
 ) {
     let mut offsets = [0_usize; 256];
     let mut sum = 0_usize;
-    for (i, &c) in hist.iter().enumerate() {
+    let indexed_histogram = histogram.iter().enumerate();
+    for (i, &count) in indexed_histogram {
         offsets[i] = sum;
-        sum += c as usize;
+        sum += count as usize;
     }
 
     for &x in src {
         let raw = (x as u32) >> SHIFT;
-        let b = if FLIP_SIGN {
-            ((raw ^ 0x80) & 0xFF) as usize
+        let bucket = if FLIP_SIGN {
+            ((raw ^ 0x80) & 0xff) as usize
         } else {
-            (raw & 0xFF) as usize
+            (raw & 0xff) as usize
         };
-        dst[offsets[b]] = x;
-        offsets[b] += 1;
+        dst[offsets[bucket]] = x;
+        offsets[bucket] += 1;
     }
 }
 
+/// Sorts an L2-resident bucket on its lower 24 bits (3 passes of 8-bit LSD radix sort)
+/// when the input initially resides in `scratch_bucket` and the final output must be in `slice_bucket`.
 pub fn l2_local_3pass_radix_sort(slice_bucket: &mut [i32], scratch_bucket: &mut [i32]) {
-    let len = slice_bucket.len();
+    let len = scratch_bucket.len();
     if len <= SMALL_SORT_CUTOFF {
+        slice_bucket.copy_from_slice(scratch_bucket);
         if len > 1 {
             in_place_small_sort(slice_bucket);
         }
@@ -451,34 +491,34 @@ pub fn l2_local_3pass_radix_sort(slice_bucket: &mut [i32], scratch_bucket: &mut 
     let mut h1 = [0_u32; 256];
     let mut h2 = [0_u32; 256];
 
-    let (chunks, rem) = scratch_bucket.as_chunks::<4>();
-    for c in chunks {
-        let u0 = c[0] as u32;
-        let u1 = c[1] as u32;
-        let u2 = c[2] as u32;
-        let u3 = c[3] as u32;
+    let (chunks, remainder) = scratch_bucket.as_chunks::<4>();
+    for chunk in chunks {
+        let u0 = chunk[0] as u32;
+        let u1 = chunk[1] as u32;
+        let u2 = chunk[2] as u32;
+        let u3 = chunk[3] as u32;
 
-        h0[(u0 & 0xFF) as usize] += 1;
-        h1[((u0 >> 8) & 0xFF) as usize] += 1;
-        h2[((u0 >> 16) & 0xFF) as usize] += 1;
+        h0[(u0 & 0xff) as usize] += 1;
+        h1[((u0 >> 8) & 0xff) as usize] += 1;
+        h2[((u0 >> 16) & 0xff) as usize] += 1;
 
-        h0[(u1 & 0xFF) as usize] += 1;
-        h1[((u1 >> 8) & 0xFF) as usize] += 1;
-        h2[((u1 >> 16) & 0xFF) as usize] += 1;
+        h0[(u1 & 0xff) as usize] += 1;
+        h1[((u1 >> 8) & 0xff) as usize] += 1;
+        h2[((u1 >> 16) & 0xff) as usize] += 1;
 
-        h0[(u2 & 0xFF) as usize] += 1;
-        h1[((u2 >> 8) & 0xFF) as usize] += 1;
-        h2[((u2 >> 16) & 0xFF) as usize] += 1;
+        h0[(u2 & 0xff) as usize] += 1;
+        h1[((u2 >> 8) & 0xff) as usize] += 1;
+        h2[((u2 >> 16) & 0xff) as usize] += 1;
 
-        h0[(u3 & 0xFF) as usize] += 1;
-        h1[((u3 >> 8) & 0xFF) as usize] += 1;
-        h2[((u3 >> 16) & 0xFF) as usize] += 1;
+        h0[(u3 & 0xff) as usize] += 1;
+        h1[((u3 >> 8) & 0xff) as usize] += 1;
+        h2[((u3 >> 16) & 0xff) as usize] += 1;
     }
-    for &x in rem {
+    for &x in remainder {
         let u = x as u32;
-        h0[(u & 0xFF) as usize] += 1;
-        h1[((u >> 8) & 0xFF) as usize] += 1;
-        h2[((u >> 16) & 0xFF) as usize] += 1;
+        h0[(u & 0xff) as usize] += 1;
+        h1[((u >> 8) & 0xff) as usize] += 1;
+        h2[((u >> 16) & 0xff) as usize] += 1;
     }
 
     let n32 = len as u32;
@@ -512,17 +552,18 @@ pub fn l2_local_3pass_radix_sort(slice_bucket: &mut [i32], scratch_bucket: &mut 
     }
 }
 
+/// Hybrid MSB-first + L2-local 3-pass LSD radix sort for large slices ($N \ge 1{,}500{,}000$).
 pub fn radix_msb_l2_hybrid_sort(slice: &mut [i32]) {
     let len = slice.len();
     let mut h3 = [0_u32; 256];
-    let (chunks, rem) = slice.as_chunks::<4>();
-    for c in chunks {
-        h3[(((c[0] as u32) >> 24) ^ 0x80) as usize] += 1;
-        h3[(((c[1] as u32) >> 24) ^ 0x80) as usize] += 1;
-        h3[(((c[2] as u32) >> 24) ^ 0x80) as usize] += 1;
-        h3[(((c[3] as u32) >> 24) ^ 0x80) as usize] += 1;
+    let (chunks, remainder) = slice.as_chunks::<4>();
+    for chunk in chunks {
+        h3[(((chunk[0] as u32) >> 24) ^ 0x80) as usize] += 1;
+        h3[(((chunk[1] as u32) >> 24) ^ 0x80) as usize] += 1;
+        h3[(((chunk[2] as u32) >> 24) ^ 0x80) as usize] += 1;
+        h3[(((chunk[3] as u32) >> 24) ^ 0x80) as usize] += 1;
     }
-    for &x in rem {
+    for &x in remainder {
         h3[(((x as u32) >> 24) ^ 0x80) as usize] += 1;
     }
 
@@ -536,19 +577,20 @@ pub fn radix_msb_l2_hybrid_sort(slice: &mut [i32]) {
 
     let mut bucket_starts = [0_usize; 256];
     let mut sum = 0_usize;
-    for (i, &c) in h3.iter().enumerate() {
+    let indexed_h3 = h3.iter().enumerate();
+    for (i, &count) in indexed_h3 {
         bucket_starts[i] = sum;
-        sum += c as usize;
+        sum += count as usize;
     }
 
     scatter_pass::<24, true>(slice, &mut scratch, &h3);
 
-    for b in 0..256 {
-        let count = h3[b] as usize;
+    for bucket in 0..256 {
+        let count = h3[bucket] as usize;
         if count == 0 {
             continue;
         }
-        let start = bucket_starts[b];
+        let start = bucket_starts[bucket];
         let end = start + count;
         if count == 1 {
             slice[start] = scratch[start];
@@ -561,6 +603,7 @@ pub fn radix_msb_l2_hybrid_sort(slice: &mut [i32]) {
     }
 }
 
+/// 4-pass 8-bit LSD radix sort with a fused single-pass 4x256 histogram and degenerate-byte skipping.
 pub fn radix_lsd_fused_sort(slice: &mut [i32]) {
     let len = slice.len();
     if len <= SMALL_SORT_CUTOFF {
@@ -577,38 +620,38 @@ pub fn radix_lsd_fused_sort(slice: &mut [i32]) {
     let mut h2 = [0_u32; 256];
     let mut h3 = [0_u32; 256];
 
-    let (chunks, rem) = slice.as_chunks::<4>();
-    for c in chunks {
-        let u0 = c[0] as u32;
-        let u1 = c[1] as u32;
-        let u2 = c[2] as u32;
-        let u3 = c[3] as u32;
+    let (chunks, remainder) = slice.as_chunks::<4>();
+    for chunk in chunks {
+        let u0 = chunk[0] as u32;
+        let u1 = chunk[1] as u32;
+        let u2 = chunk[2] as u32;
+        let u3 = chunk[3] as u32;
 
-        h0[(u0 & 0xFF) as usize] += 1;
-        h1[((u0 >> 8) & 0xFF) as usize] += 1;
-        h2[((u0 >> 16) & 0xFF) as usize] += 1;
+        h0[(u0 & 0xff) as usize] += 1;
+        h1[((u0 >> 8) & 0xff) as usize] += 1;
+        h2[((u0 >> 16) & 0xff) as usize] += 1;
         h3[((u0 >> 24) ^ 0x80) as usize] += 1;
 
-        h0[(u1 & 0xFF) as usize] += 1;
-        h1[((u1 >> 8) & 0xFF) as usize] += 1;
-        h2[((u1 >> 16) & 0xFF) as usize] += 1;
+        h0[(u1 & 0xff) as usize] += 1;
+        h1[((u1 >> 8) & 0xff) as usize] += 1;
+        h2[((u1 >> 16) & 0xff) as usize] += 1;
         h3[((u1 >> 24) ^ 0x80) as usize] += 1;
 
-        h0[(u2 & 0xFF) as usize] += 1;
-        h1[((u2 >> 8) & 0xFF) as usize] += 1;
-        h2[((u2 >> 16) & 0xFF) as usize] += 1;
+        h0[(u2 & 0xff) as usize] += 1;
+        h1[((u2 >> 8) & 0xff) as usize] += 1;
+        h2[((u2 >> 16) & 0xff) as usize] += 1;
         h3[((u2 >> 24) ^ 0x80) as usize] += 1;
 
-        h0[(u3 & 0xFF) as usize] += 1;
-        h1[((u3 >> 8) & 0xFF) as usize] += 1;
-        h2[((u3 >> 16) & 0xFF) as usize] += 1;
+        h0[(u3 & 0xff) as usize] += 1;
+        h1[((u3 >> 8) & 0xff) as usize] += 1;
+        h2[((u3 >> 16) & 0xff) as usize] += 1;
         h3[((u3 >> 24) ^ 0x80) as usize] += 1;
     }
-    for &x in rem {
+    for &x in remainder {
         let u = x as u32;
-        h0[(u & 0xFF) as usize] += 1;
-        h1[((u >> 8) & 0xFF) as usize] += 1;
-        h2[((u >> 16) & 0xFF) as usize] += 1;
+        h0[(u & 0xff) as usize] += 1;
+        h1[((u >> 8) & 0xff) as usize] += 1;
+        h2[((u >> 16) & 0xff) as usize] += 1;
         h3[((u >> 24) ^ 0x80) as usize] += 1;
     }
 
@@ -660,6 +703,8 @@ pub fn radix_lsd_fused_sort(slice: &mut [i32]) {
     }
 }
 
+/// Sorts a mutable slice of 32-bit signed integers (`i32`) in ascending order using the
+/// adaptive `latticesort` pipeline.
 pub fn lattice_sort_i32(data: &mut [i32]) {
     if data.len() <= SMALL_SORT_CUTOFF {
         if data.len() > 1 {
@@ -670,16 +715,17 @@ pub fn lattice_sort_i32(data: &mut [i32]) {
     if try_bitonic_run_merge(data) {
         return;
     }
-    let (aggregated, span_exceeds_horizon) = try_sentinel_hash_aggregation(data);
-    if aggregated {
+    let outcome = try_sentinel_hash_aggregation(data);
+    if outcome.sorted {
         return;
     }
-    if !span_exceeds_horizon && try_dense_range_count(data) {
+    if !outcome.span_exceeds_horizon && try_dense_range_count(data) {
         return;
     }
     radix_lsd_fused_sort(data);
 }
 
+/// Alias entry point used by the `autoresearch` evaluation harness.
 #[inline]
 pub fn candidate_sort(data: &mut [i32]) {
     lattice_sort_i32(data);

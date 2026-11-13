@@ -1,28 +1,49 @@
+//! Evaluation harness and synthetic dataset generators for `latticesort`.
+
 use std::time::Instant;
 
+/// Timing and speedup metrics for a single benchmark dataset.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct CaseResult {
+    /// Human-readable label of the benchmark dataset.
     pub label: &'static str,
+    /// Median execution time of the candidate sorting algorithm in milliseconds.
     pub candidate_ms: f64,
+    /// Median execution time of `std::slice::sort_unstable` in milliseconds.
     pub std_ms: f64,
+    /// Ratio `std_ms / candidate_ms` (values above `1.0` indicate speedup over `std`).
     pub speedup: f64,
 }
 
+/// Aggregated benchmark report across all datasets in the evaluation suite.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct SuiteReport {
+    /// Per-dataset timing and speedup results.
     pub cases: Vec<CaseResult>,
+    /// Geometric mean execution time of the candidate algorithm in milliseconds.
     pub candidate_geomean_ms: f64,
+    /// Geometric mean execution time of `std::slice::sort_unstable` in milliseconds.
     pub std_geomean_ms: f64,
+    /// Overall geometric mean speedup ratio (`std_geomean_ms / candidate_geomean_ms`).
     pub overall_speedup: f64,
 }
 
-#[must_use]
-pub fn make_mod_k(n: usize, k: i32) -> Vec<i32> {
-    (0..n).map(|i| ((i as i64 * 7) % i64::from(k)) as i32).collect()
+struct BenchmarkDataset {
+    label: &'static str,
+    values: Vec<i32>,
 }
 
+/// Generates a deterministic cyclic modulo-$k$ dataset of length `n`.
+#[must_use]
+pub fn make_mod_k(n: usize, k: i32) -> Vec<i32> {
+    (0..n)
+        .map(|i| ((i as i64 * 7) % i64::from(k)) as i32)
+        .collect()
+}
+
+/// Generates a low-cardinality dataset with $k$ distinct values spread across a wide $10^9$ span.
 #[must_use]
 pub fn make_wide_mod_k(n: usize, k: u32) -> Vec<i32> {
     let mut out = Vec::with_capacity(n);
@@ -35,6 +56,7 @@ pub fn make_wide_mod_k(n: usize, k: u32) -> Vec<i32> {
     out
 }
 
+/// Generates pseudo-random values uniformly distributed in `0..k`.
 #[must_use]
 pub fn make_random_mod_k(n: usize, k: u32) -> Vec<i32> {
     let mut out = Vec::with_capacity(n);
@@ -46,6 +68,7 @@ pub fn make_random_mod_k(n: usize, k: u32) -> Vec<i32> {
     out
 }
 
+/// Generates a bitonic wave (ascending first half, descending second half).
 #[must_use]
 pub fn make_soliton_wave(n: usize) -> Vec<i32> {
     let mut out = Vec::with_capacity(n);
@@ -59,19 +82,21 @@ pub fn make_soliton_wave(n: usize) -> Vec<i32> {
     out
 }
 
+/// Generates a skewed Pareto power-law distribution with heavy clustering near zero.
 #[must_use]
 pub fn make_pareto_power_law(n: usize) -> Vec<i32> {
     let mut out = Vec::with_capacity(n);
     let mut seed: u32 = 271_828_182;
     for _ in 0..n {
         seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        let denom = ((seed >> 16) & 0x0FFF) + 1;
-        let val = (seed & 0x000F_FFFF) / denom;
+        let denom = ((seed >> 16) & 0x0fff) + 1;
+        let val = (seed & 0x000f_ffff) / denom;
         out.push(val as i32);
     }
     out
 }
 
+/// Generates uniformly distributed 32-bit signed integers across the full `i32` range.
 #[must_use]
 pub fn make_uniform_random(n: usize) -> Vec<i32> {
     let mut out = Vec::with_capacity(n);
@@ -83,6 +108,11 @@ pub fn make_uniform_random(n: usize) -> Vec<i32> {
     out
 }
 
+/// Verifies `sort_fn` against `std::slice::sort_unstable` across boundary and edge cases.
+///
+/// # Panics
+///
+/// Panics if `sort_fn` produces a slice that differs from `std::slice::sort_unstable`.
 pub fn verify_edge_cases(sort_fn: fn(&mut [i32])) {
     let cases: Vec<Vec<i32>> = vec![
         vec![],
@@ -117,43 +147,76 @@ fn measure_median_ms(base: &[i32], buf: &mut [i32], sort_fn: fn(&mut [i32]), tri
     times[trials / 2]
 }
 
+/// Evaluates `sort_fn` across all 9 benchmark distributions of length `n`.
+///
+/// # Panics
+///
+/// Panics if `sort_fn` produces an improperly sorted result on any dataset.
 #[must_use]
 pub fn evaluate_candidate(sort_fn: fn(&mut [i32]), n: usize) -> SuiteReport {
     verify_edge_cases(sort_fn);
 
-    let datasets: Vec<(&'static str, Vec<i32>)> = vec![
-        ("1. Cyclic K=12 (non-13)", make_mod_k(n, 12)),
-        ("2. Cyclic K=13 (base-13)", make_mod_k(n, 13)),
-        ("3. Cyclic K=17 (prime)", make_mod_k(n, 17)),
-        ("4. Wide K=13 (span 10^9)", make_wide_mod_k(n, 13)),
-        ("5. Random K=100", make_random_mod_k(n, 100)),
-        ("6. Random K=1000", make_random_mod_k(n, 1000)),
-        ("7. Soliton Wave (bimodal)", make_soliton_wave(n)),
-        ("8. Pareto Power-Law", make_pareto_power_law(n)),
-        ("9. Uniform 32-bit Random", make_uniform_random(n)),
+    let datasets: Vec<BenchmarkDataset> = vec![
+        BenchmarkDataset {
+            label: "1. Cyclic K=12 (non-13)",
+            values: make_mod_k(n, 12),
+        },
+        BenchmarkDataset {
+            label: "2. Cyclic K=13 (base-13)",
+            values: make_mod_k(n, 13),
+        },
+        BenchmarkDataset {
+            label: "3. Cyclic K=17 (prime)",
+            values: make_mod_k(n, 17),
+        },
+        BenchmarkDataset {
+            label: "4. Wide K=13 (span 10^9)",
+            values: make_wide_mod_k(n, 13),
+        },
+        BenchmarkDataset {
+            label: "5. Random K=100",
+            values: make_random_mod_k(n, 100),
+        },
+        BenchmarkDataset {
+            label: "6. Random K=1000",
+            values: make_random_mod_k(n, 1000),
+        },
+        BenchmarkDataset {
+            label: "7. Soliton Wave (bimodal)",
+            values: make_soliton_wave(n),
+        },
+        BenchmarkDataset {
+            label: "8. Pareto Power-Law",
+            values: make_pareto_power_law(n),
+        },
+        BenchmarkDataset {
+            label: "9. Uniform 32-bit Random",
+            values: make_uniform_random(n),
+        },
     ];
 
     let mut cases = Vec::with_capacity(datasets.len());
-    let mut log_sum_cand = 0.0_f64;
+    let mut log_sum_candidate = 0.0_f64;
     let mut log_sum_std = 0.0_f64;
-    let mut work_cand = vec![0_i32; n];
+    let mut work_candidate = vec![0_i32; n];
     let mut work_std = vec![0_i32; n];
 
-    for (label, data) in &datasets {
-        let std_ms = measure_median_ms(data, &mut work_std, <[i32]>::sort_unstable, 3);
-        let candidate_ms = measure_median_ms(data, &mut work_cand, sort_fn, 3);
+    for dataset in &datasets {
+        let std_ms = measure_median_ms(&dataset.values, &mut work_std, <[i32]>::sort_unstable, 3);
+        let candidate_ms = measure_median_ms(&dataset.values, &mut work_candidate, sort_fn, 3);
 
         assert_eq!(
-            work_cand, work_std,
-            "Candidate produced incorrect ordering on dataset: {label}"
+            work_candidate, work_std,
+            "Candidate produced incorrect ordering on dataset: {}",
+            dataset.label
         );
 
         let speedup = std_ms / candidate_ms;
-        log_sum_cand += candidate_ms.ln();
+        log_sum_candidate += candidate_ms.ln();
         log_sum_std += std_ms.ln();
 
         cases.push(CaseResult {
-            label,
+            label: dataset.label,
             candidate_ms,
             std_ms,
             speedup,
@@ -161,7 +224,7 @@ pub fn evaluate_candidate(sort_fn: fn(&mut [i32]), n: usize) -> SuiteReport {
     }
 
     let count = datasets.len() as f64;
-    let candidate_geomean_ms = (log_sum_cand / count).exp();
+    let candidate_geomean_ms = (log_sum_candidate / count).exp();
     let std_geomean_ms = (log_sum_std / count).exp();
     let overall_speedup = std_geomean_ms / candidate_geomean_ms;
 
