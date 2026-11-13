@@ -10,7 +10,7 @@
 //!    single-pass fused histograms and degenerate-byte skipping.
 
 const DENSE_RANGE_MAX_SPAN: u64 = 1_048_576;
-const SMALL_SORT_CUTOFF: usize = 96;
+const SMALL_SORT_CUTOFF: usize = 384;
 const STACK_SCRATCH_MAX: usize = 2048;
 const MSB_L2_PARTITION_THRESHOLD: usize = 1_500_000;
 
@@ -45,42 +45,9 @@ fn insertion_sort(slice: &mut [i32]) {
     }
 }
 
+#[inline]
 fn in_place_small_sort(slice: &mut [i32]) {
-    let len = slice.len();
-    if len <= 24 {
-        insertion_sort(slice);
-        return;
-    }
-    let mid = len / 2;
-    let last = len - 1;
-    if slice[mid] < slice[0] {
-        slice.swap(0, mid);
-    }
-    if slice[last] < slice[0] {
-        slice.swap(0, last);
-    }
-    if slice[last] < slice[mid] {
-        slice.swap(mid, last);
-    }
-    let pivot = slice[mid];
-    let mut i = 0_usize;
-    let mut j = last;
-    loop {
-        while slice[i] < pivot {
-            i += 1;
-        }
-        while slice[j] > pivot {
-            j -= 1;
-        }
-        if i >= j {
-            break;
-        }
-        slice.swap(i, j);
-        i += 1;
-        j -= 1;
-    }
-    in_place_small_sort(&mut slice[..=j]);
-    in_place_small_sort(&mut slice[j + 1..]);
+    slice.sort_unstable();
 }
 
 fn merge_sorted_halves(slice: &mut [i32], split: usize) {
