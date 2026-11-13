@@ -286,3 +286,29 @@ cargo run --release --bin bench_1b
 ## Interactive 3D Visualization (Three.js r187)
 
 An interactive 3D WebGL visualizer of the internal stages of `latticesort` is included in `viz/index.html`. Serve the repository root with any local static server to explore the 3D scene in your browser.
+
+---
+
+## License
+
+Released under the [MIT (Massachusetts Institute of Technology, permissive free software license) License](https://github.com/SimpleSoftwareLTDA/latticesort/blob/main/LICENSE). Copyright (c) 2026 Robson Cassiano.
+
+---
+
+## Citing
+
+Author: [Robson Cassiano](https://orcid.org/0009-0009-5188-361X) (ORCID (Open Researcher and Contributor ID, persistent digital identifier for researchers): [0009-0009-5188-361X](https://orcid.org/0009-0009-5188-361X)).
+
+For the source code, cite the software entry below. GitHub's "Cite this repository" button reads [CITATION.cff](https://github.com/SimpleSoftwareLTDA/latticesort/blob/main/CITATION.cff).
+
+```bibtex
+@software{cassiano2026latticesort,
+  author = {Cassiano, Robson},
+  title = {{latticesort}: adaptive structural, hash-aggregated, and cache-aware hybrid radix sorting in safe Rust},
+  year = {2026},
+  version = {0.1.0},
+  url = {https://github.com/SimpleSoftwareLTDA/latticesort},
+  license = {MIT},
+  note = {Author ORCID: https://orcid.org/0009-0009-5188-361X}
+}
+```

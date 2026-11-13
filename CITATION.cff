@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use latticesort, please cite it as below."
+title: "latticesort: adaptive structural, hash-aggregated, and cache-aware hybrid radix sorting in safe Rust"
+authors:
+  - family-names: Cassiano
+    given-names: Robson
+    orcid: "https://orcid.org/0009-0009-5188-361X"
+version: 0.1.0
+date-released: 2026-11-12
+license: MIT
+repository-code: "https://github.com/SimpleSoftwareLTDA/latticesort"
+url: "https://github.com/SimpleSoftwareLTDA/latticesort"
+type: software
+keywords:
+  - sorting
+  - radix-sort
+  - algorithms
+  - rust
+  - data-structures
