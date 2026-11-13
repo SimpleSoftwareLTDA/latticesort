@@ -1,44 +1,169 @@
 # `latticesort`
 
-`latticesort` is a zero-dependency, 100% safe Rust sorting library for primitive integers (`i32`, `u32`, `i64`, `u64`) and floating-point slices (`f32`, `f64`). Developed through an autonomous experimental research campaign (`autoresearch`) and hardened against an adversarial red-team suite, `latticesort` achieves a **4.98x geometric mean speedup** at $N = 1{,}000{,}000$ and a **4.02x geometric mean speedup** at $N = 10{,}000{,}000$ over Rust's standard library `std::slice::sort_unstable` (`ipnsort` / pattern-defeating quicksort).
+`latticesort` is a zero-dependency, 100% safe Rust sorting library for primitive integers (`i32`, `u32`, `i64`, `u64`) and floating-point slices (`f32`, `f64`). Developed through an autonomous experimental research campaign (`autoresearch`) and hardened against an adversarial red-team suite, `latticesort` achieves a **4.98x to 5.68x geometric mean speedup** at $N = 1{,}000{,}000$ and a **4.02x geometric mean speedup** at $N = 10{,}000{,}000$ over Rust's standard library `std::slice::sort_unstable` (`ipnsort` / pattern-defeating quicksort).
 
 ---
 
-## Key Architectural Improvements Over `std::slice::sort_unstable`
+## Why the Name `LatticeSort`?
 
-`std::slice::sort_unstable` is a general comparison-based hybrid sort bounded by $\Omega(n \log n)$ comparisons on high-entropy keys and $O(n \log k)$ partitioning steps on low-cardinality inputs. `latticesort` combines five specialized stages that adapt to the structural topology, cardinality, value span, and cache footprint of the input slice:
-
-1. **Bitonic and Structural Run Merger (`try_bitonic_run_merge`)**:
-   - Performs an 8-point constant-time stride check to filter high-entropy slices before scanning.
-   - Detects ascending runs, descending runs, crest-to-trough bitonic waves ($\cap$), valley-to-crest bitonic waves ($\cup$), and inputs with at least a 75% sorted prefix in a single linear $O(n)$ pass.
-   - Includes constant-plateau snap-back to prevent equal-value prefixes from splitting across merge boundaries, completing in a single `copy_within` + `fill` pass when the prefix is uniform.
-
-2. **Dual-Sentinel Direct-Mapped Hash Aggregation (`try_sentinel_hash_aggregation`)**:
-   - Samples 128 elements using 5 contiguous 16-element quartile bursts combined with a 48-element golden-ratio stride probe to detect low-cardinality distributions while resisting localized entropy traps.
-   - Aggregates up to 384 distinct keys inside a stack-allocated 1024-slot table held in L1 (Level 1 Cache, the fastest cache memory core-local to the processor).
-   - Uses a dual-sentinel invariant: all slots `s != s0` are initialized to `d0 = 0`, while `s0 = hash(0)` is initialized to a secondary key `d1` whose hash differs from `s0`. Because no slot initially holds a key that hashes to its own index, the hot loop verifies a hit with a single `keys[s] == val` comparison without consulting an occupancy bitmap.
-   - Selects a collision-free Fibonacci/SplitMix multiplier from 4 candidates based on the 128-element probe before scanning the slice.
-
-3. **Cache-Bounded Dense Range Counting (`try_dense_range_count`)**:
-   - Pre-filtered at zero extra memory cost by the 128-element probe span (`probe_max - probe_min`).
-   - When the full key span `max - min` fits within `min(n, 1_048_576)`, sorts in $O(n + \text{span})$ via offset counting inside L2 (Level 2 Cache, the intermediate cache memory between L1 and shared cache) and L3 (Level 3 Cache, the shared last-level cache across processor cores).
-
-4. **Fused-Histogram LSD (Least Significant Digit, a radix sorting order that processes bytes from lowest to highest significance) Radix Sort with Degenerate-Byte Skipping (`radix_lsd_fused_sort`)**:
-   - Computes all four 256-entry byte histograms (or all eight histograms for 64-bit keys) in a single vectorized 4x-unrolled pass (`as_chunks::<4>()`).
-   - Skips any byte pass where a single bucket count equals `n` (zero-entropy byte), cutting scatter passes in half on bounded integers and realistic 64-bit timestamps.
-   - Uses a stack-allocated scratch buffer (`[0_i32; 2048]`) for slices up to $N = 2{,}048$ to eliminate heap allocation overhead on small and medium inputs.
-
-5. **Hybrid MSB (Most Significant Byte, the highest-order byte of a multi-byte word that partitions keys into coarse buckets) + L2-Local Radix Sort (`radix_msb_l2_hybrid_sort`)**:
-   - At $N \ge 1{,}500{,}000$, scattering across a full array exceeds L3 capacity and triggers TLB (Translation Lookaside Buffer, the hardware cache that translates virtual memory addresses to physical pages) misses.
-   - `latticesort` partitions the slice once by the signed MSB into 256 contiguous sub-buckets (~156 KB each at $N = 10{,}000{,}000$), then sorts the remaining 24 bits of each bucket locally inside L2 cache.
+1. **Order Theory and Abstract Algebra**: In discrete mathematics and Computer Science, a **lattice** is a partially ordered set $(L, \le)$ in which every pair of elements $(a, b)$ has a unique supremum (join, $a \vee b = \max(a, b)$) and a unique infimum (meet, $a \wedge b = \min(a, b)$). Every totally ordered numeric domain sorted by this library (`i32`, `u32`, `i64`, `u64`, and total-order `f32`/`f64`) forms a distributive lattice.
+2. **Solid-State Physics and Hardware Cache Geometry**: In physics, a **crystal lattice** is a periodic array of fixed spatial sites where particles settle into minimum-energy equilibrium positions. Instead of sorting via millions of pairwise element-to-element duels, `latticesort` projects keys directly into fixed-address coordinate slots inside L1 (Level 1 Cache, the fastest cache memory core-local to the processor) and L2 (Level 2 Cache, the intermediate cache memory between L1 and shared cache).
+3. **In Plain English**: Traditional sorting works like a line of blindfolded people trying to line up by height by comparing themselves two at a time. `LatticeSort` works like a hotel mailroom wall of numbered pigeonholes (a **lattice**): each number's own mathematical value tells it the exact pigeonhole where it belongs, skipping pairwise duels altogether.
 
 ---
 
-## Performance Benchmarks vs `std::slice::sort_unstable`
+## Part 1: How `LatticeSort` Works in Plain English (Layman's Guide)
+
+### 1. The "Quick Glance" and the Zipper Merge (*Bitonic Run Merger*)
+Real-world lists often arrive with an existing shape: stock prices that rose until midday and then fell (a wave), reversed logs, or database tables that are already 90% sorted with a few new rows appended at the end.
+* **What standard algorithms do**: Chop the entire list into pieces and start comparing items from scratch.
+* **What `LatticeSort` does**: It takes a quick glance at just **8 evenly spaced spots** in the list. When it sees a rising-then-falling wave (or a falling-then-rising valley), it grabs both ends of the wave and pulls them together like a **zipper**, merging the two halves in a single pass.
+
+### 2. The 1024-Slot Egg Carton and the "Two-Coin Trick" (*Dual-Sentinel L1 Hash Aggregation*)
+Huge real-world datasets frequently repeat a small set of distinct values (customer ages, ratings from 1 to 100, status codes, or sensor tiers).
+* **What standard algorithms do**: Shuffle the same duplicate numbers back and forth millions of times.
+* **What `LatticeSort` does**: It places a tiny **1024-slot counting tray** inside the processor's fastest memory (L1) and simply tallies how many times each value appears: *"the number 7 appeared 80,000 times; the number 12 appeared 90,000 times"*. At the end, it writes out eighty thousand 7s followed by ninety thousand 12s in one contiguous sweep.
+* **The Two-Coin Trick (Dual-Sentinel Invariant)**: Normally, to know whether a slot in a counting tray is empty or already holding a number, the computer must check a separate "occupied" checklist on every single item. `LatticeSort` eliminates that checklist check: it pre-fills every slot in the tray with the number `0`, except for the single slot where `0` itself belongs, where it places the number `1`. Because no slot starts out holding its own true owner, the processor immediately knows a slot is valid whenever the number inside matches the number being read.
+
+### 3. The Numbered Ruler for Clustered Numbers (*Cache-Bounded Dense Range Counting*)
+Sometimes a list has thousands of different numbers, but they all sit within a compact range (such as salaries, temperatures, or product prices between \$10 and \$5,000).
+* **What `LatticeSort` does**: It measures the distance between the smallest and largest number in the list. When that distance fits inside fast processor memory, it lays down a numbered ruler from the minimum value to the maximum value, tallies how many items land on each millimeter mark, and reads the ruler from left to right. On financial and Pareto distributions, this is **11x faster** than Rust's standard sort.
+
+### 4. The Single-Pass Post Office Sorter that Skips Identical Zip Codes (*Fused LSD Radix Sort with Byte Skip*)
+When numbers are completely random and span billions of values, `LatticeSort` acts like an automated postal sorting machine that sorts letters digit by digit (first by street, then city, then state, then country), a technique known as LSD (Least Significant Digit, a radix sorting order that processes bytes from lowest to highest significance) radix sort.
+* **What classic Radix Sort does**: Reads all 1 million letters to count the streets, moves all 1 million letters; reads all 1 million letters again to count the cities, moves all 1 million letters; repeating 8 full trips across memory.
+* **What `LatticeSort` does**:
+  1. **One-Trip Quadruple Tally**: Reads the list **once** at the start and tallies all 4 byte positions (street, city, state, country) at the same time.
+  2. **Skipping Identical Digits**: If the tally shows that all 1 million letters belong to the same country and state (which happens constantly with timestamps from the same year or positive integers in a bounded range), `LatticeSort` **skips those sorting passes in zero seconds**, cutting memory traffic in half.
+
+### 5. Dividing 10 Million Items into 256 "Neighborhoods" (*MSB + L2 Hybrid Partitioning*)
+Sorting 10 million items scattered across a giant warehouse takes a long time because workers spend all their time walking back and forth across the warehouse floor. In a computer, that distant warehouse is RAM (Random-Access Memory, the main system memory outside the processor), while the workbench right in front of the worker is L2 cache.
+* **What `LatticeSort` does**: For lists of 1.5 million items or more, it first groups the items by their highest byte, called the MSB (Most Significant Byte, the highest-order byte of a multi-byte word that partitions keys into coarse buckets), into **256 smaller neighborhood boxes**. Each neighborhood box is small enough (~156 KB) to fit completely on the processor's L2 workbench, so the processor finishes each box at top speed without walking back to RAM, or hands different boxes to multiple processor cores simultaneously (**5.05x faster** than standard Rust).
+
+---
+
+## Part 2: Mathematical Foundations, Formal Invariants, and Technical Architecture
+
+### Stage 1: Bitonic Envelope & Structural Run Merger (`try_bitonic_run_merge`)
+
+Given an input slice $A[0 \dots n-1]$, an 8-point constant-time stride probe evaluates the discrete derivative signs at indices $p_k = k \cdot \lfloor n / 8 \rfloor$ for $k \in \{1, \dots, 7\}$:
+
+$$s_k = \operatorname{sgn}(A[p_k] - A[p_{k-1}]) \in \{-1, 0, +1\}$$
+
+If the number of sign inversions $\sum_{k=2}^{7} \mathbb{I}(s_k \neq 0 \land s_k \neq s_{k-1}) > 1$, the stage aborts in $O(1)$ time (7 comparisons). Otherwise, it scans for the monotone inflection index $m$:
+* **Strictly Ascending ($m = n - 1$)**: Returns immediately in $O(n)$ with 0 writes.
+* **Strictly Descending ($m = 0$, valley at $n - 1$)**: Reverses $A$ in-place via $\lfloor n/2 \rfloor$ swaps.
+* **Crest-to-Trough Bitonic Envelope ($\cap$, $A[0] \le \dots \le A[m]$ and $A[m+1] \ge \dots \ge A[n-1]$)**: Merges the ascending left slice $A[0 \dots m]$ (indexed forward by $i = 0 \to m$) and the descending right slice $A[m+1 \dots n-1]$ (indexed backward by $j = n-1 \to m+1$) in a single linear pass:
+
+$$T_{\text{bitonic}}(n) = O(n) \text{ comparisons and } 1 \text{ sequential write pass}$$
+
+* **Plateau Snap-Back Invariant**: When $m \ge \frac{3}{4}n$ (long sorted prefix followed by an unsorted tail) and $A[0] = A[\lfloor m/2 \rfloor] = c$, the prefix contains a constant plateau. If $A[m] > c$, the split index snaps back to $m' = \max \{ idx \le m \mid A[idx] = c \}$, sorts the tail $A[m'+1 \dots n-1]$, and splices the entire constant block $c$ into position in a single `copy_within` + `fill` operation without allocating a merge buffer.
+
+---
+
+### Stage 2: Dual-Sentinel Direct-Mapped Hash Aggregation (`try_sentinel_hash_aggregation`)
+
+To detect low-cardinality inputs ($K \le 384$ unique keys) while defeating localized entropy traps, `latticesort` samples 128 elements using 5 contiguous 16-element quartile bursts at anchors $q \in \{0.1n, 0.3n, 0.5n, 0.7n, n-16\}$ combined with 48 golden-ratio stride samples:
+
+$$\text{stride} = \left\lfloor \frac{n \cdot 2654435761}{2^{32}} \right\rfloor \lor 1, \quad \varphi^{-1} \approx \frac{2654435761}{2^{32}}$$
+
+#### Multiplicative Hash Family
+For a 32-bit key $x \in \mathbb{Z}_{2^{32}}$ and a candidate odd multiplier $\mu \in \{ \text{0x9e3779b9}, \text{0x85ebca6b}, \text{0xc2b2ae35}, \text{0x27d4eb2f} \}$, the 10-bit slot index in the 1024-entry L1 table is:
+
+$$h_{\mu}(x) = \left( ((x \oplus (x \gg 15)) \cdot \mu) \bmod 2^{32} \right) \gg 22 \in \{0, \dots, 1023\}$$
+
+The algorithm selects the first multiplier $\mu^*$ that produces zero collisions across the unique keys of the 128-element probe.
+
+#### Formal Proof of the Dual-Sentinel Invariant
+Let $s_0 = h_{\mu^*}(0)$ be the home slot of key $d_0 = 0$, and choose $d_1 = \min \{ v \in \mathbb{Z}^+ \mid h_{\mu^*}(v) \neq s_0 \}$. Initialize the 1024-slot key array $K[0 \dots 1023]$ as:
+
+$$K[s] = \begin{cases} d_1 & \text{if } s = s_0 \\ d_0 & \text{if } s \neq s_0 \end{cases}$$
+
+**Theorem**: Prior to any insertion, $\forall x \in \mathbb{Z}_{2^{32}}$, let $s = h_{\mu^*}(x)$; then $K[s] \neq x$.
+* *Case 1 ($s = s_0$)*: By definition of $s = h_{\mu^*}(x) = s_0$ and $h_{\mu^*}(d_1) \neq s_0$, we have $x \neq d_1 = K[s_0]$.
+* *Case 2 ($s \neq s_0$)*: Since $h_{\mu^*}(d_0) = s_0 \neq s = h_{\mu^*}(x)$, we have $x \neq d_0 = K[s]$.
+
+Consequently, a direct hit $K[h_{\mu^*}(x)] == x$ on the home slot is a **necessary and sufficient condition** that $x$ has already been registered in its home slot, eliminating the occupancy bitmap check `used[s]` from the fast path of the inner loop:
+
+$$T_{\text{hash}}(n, K) = O(n + K \log K), \quad \text{Space} = 8\text{ KB on stack (L1)}$$
+
+---
+
+### Stage 3: Cache-Bounded Dense Range Counting (`try_dense_range_count`)
+
+The 128-element probe from Stage 2 yields a lower bound on the global span:
+
+$$\Delta_{\text{probe}} = \max(P) - \min(P) \le \Delta_{\text{global}} = \max(A) - \min(A)$$
+
+If $\Delta_{\text{probe}} > \min(n, 1{,}048{,}576)$, Stage 3 is bypassed in $O(1)$ time with zero memory reads. Otherwise, if $\Delta_{\text{global}} \le \min(n, 1{,}048{,}576)$, an offset frequency array $D[0 \dots \Delta_{\text{global}}]$ is populated inside L2/L3 (Level 3 Cache, the shared last-level cache across processor cores):
+
+$$D[A[i] - \min(A)] \mathrel{+}= 1, \quad T_{\text{dense}}(n, \Delta_{\text{global}}) = O(n + \Delta_{\text{global}})$$
+
+---
+
+### Stage 4: Fused-Histogram Radix Sort & Degenerate-Byte Skipping (`radix_lsd_fused_sort`)
+
+For 32-bit signed integers ($b = 4$ bytes) or 64-bit signed integers ($b = 8$ bytes), all $b$ histograms $H_0, \dots, H_{b-1} \in \mathbb{N}^{256}$ are accumulated in a single 4-way unrolled pass (`as_chunks::<4>()`):
+
+$$H_r\left[ \left( (A[i] \gg (8r)) \oplus \delta_{r, b-1} \cdot \text{0x80} \right) \mathbin{\&} \text{0xff} \right] \mathrel{+}= 1 \quad \forall r \in \{0, \dots, b-1\}$$
+
+where the Kronecker delta $\delta_{r, b-1}$ flips the sign bit (`0x80`) on the most significant byte so two's-complement negative integers precede positive integers.
+
+**Degenerate-Byte Skipping**: Before executing scatter pass $r$, the kernel checks whether byte $r$ has zero Shannon entropy:
+
+$$\exists c \in \{0, \dots, 255\} \text{ such that } H_r[c] = n \implies \text{Skip pass } r \text{ in } O(1)$$
+
+If only $p \le b$ byte positions vary across the dataset, the total memory work drops from $2b \cdot n$ to $(1 + p) \cdot n$ array traversals.
+
+---
+
+### Stage 5: Hybrid MSB + L2-Local Radix Partitioning (`radix_msb_l2_hybrid_sort`)
+
+When $n \ge 1{,}500{,}000$, scattering randomly across 256 buckets in a $4\text{ MB} \dots 40\text{ MB}$ array exceeds L2 capacity and induces TLB (Translation Lookaside Buffer, the hardware cache that translates virtual memory addresses to physical pages) thrashing. `latticesort` partitions the slice once by the signed MSB ($r = 3$) into 256 contiguous sub-problems $B_0, \dots, B_{255}$ of expected size:
+
+$$\mathbb{E}[|B_c|] = \frac{n}{256} \quad (\approx 156\text{ KB at } n = 10{,}000{,}000)$$
+
+Each bucket $B_c$ fits inside L2 cache, where the lower 24 bits ($r \in \{0, 1, 2\}$) are sorted locally via `l2_local_3pass_radix_sort` (or dispatched across CPU (Central Processing Unit, the primary processor executing program instructions) cores in `parallel_lattice_sort`).
+
+---
+
+### Stage 6: Order-Preserving Bijective Bit Projections (`LatticeSortable`)
+
+To sort unsigned integers and IEEE (Institute of Electrical and Electronics Engineers, the standards body defining the 754 floating-point binary representation) 754 floating-point numbers using the signed integer kernels:
+
+* **Unsigned Integers (`u32` / `u64`)**:
+
+$$\phi_{\text{uint}}(u) = u \oplus 2^{w-1} \quad (w \in \{32, 64\})$$
+
+* **IEEE 754 Floating-Point (`f32` / `f64`)**: In IEEE 754 sign-magnitude encoding, positive floats already ascend lexicographically with their bit pattern, whereas negative floats (`sign_bit = 1`) descend as magnitude increases. Defining the arithmetic sign-extension mask $M(bits) = \text{sar}(bits, w - 1) \mathbin{\&} (2^{w-1} - 1)$, the self-inverse bijection is:
+
+$$\phi_{\text{float}}(bits) = bits \oplus \left( \text{sar}(bits, w - 1) \mathbin{\&} \text{0x7fff\_ffff} \right), \quad \phi_{\text{float}}^{-1} = \phi_{\text{float}}$$
+
+This maps $[-\infty, -0.0, +0.0, +\infty]$ monotonically onto the signed integer lattice in $O(1)$ bitwise instructions without branches.
+
+---
+
+## Performance Benchmarks vs Literature Sorting Algorithms
 
 All benchmarks were compiled with `rustc 1.100.0` (`-C opt-level=3`, Link-Time Optimization enabled, `codegen-units = 1`) and verified bit-for-bit against `std::slice::sort_unstable`.
 
-### 1. Primary Benchmark Suite ($N = 1{,}000{,}000$ `i32` Elements)
+### 1. Comparison Against 6 Sorting Algorithms from Computer Science Literature ($N = 1{,}000{,}000$)
+
+Executed via `cargo run --release --bin bench_literature` across all 9 benchmark distributions:
+
+| Literature Algorithm | Scientific Citation | Geometric Mean (9 Datasets) | Uniform 32-Bit Random | `latticesort` Geomean Speedup | `latticesort` Uniform32 Speedup |
+| :--- | :--- | ---: | ---: | ---: | ---: |
+| **`latticesort`** | **This crate (`src/candidate.rs`)** | **`1.064 ms`** | **`5.206 ms`** | **1.00x (Baseline)** | **1.00x (Baseline)** |
+| **1. `driftsort`** (`std::slice::sort`) | Bergdoll & Peters (2024), modern stable merge sort in Rust 1.81+ | `5.341 ms` | `19.840 ms` | **5.02x faster** | **3.81x faster** |
+| **2. `ipnsort`** (`std::slice::sort_unstable`) | Bergdoll & Peters (2024), pattern-defeating network sort in Rust 1.81+ | `6.046 ms` | `16.465 ms` | **5.68x faster** | **3.16x faster** |
+| **3. Classic 4-Pass LSD Radix Sort** | Seward (1954) / Knuth, *The Art of Computer Programming* Vol. 3 (1973) | `11.948 ms` | `6.470 ms` | **11.23x faster** | **1.24x faster** |
+| **4. American Flag Sort (In-Place MSB Radix)** | McIlroy, Bostic & McIlroy (1993), 256-ary cyclic bucket permutation | `14.871 ms` | `26.658 ms` | **13.98x faster** | **5.12x faster** |
+| **5. Bentley-McIlroy 3-Way Quicksort** | Bentley & McIlroy (1993), C `qsort` with DNF (Dutch National Flag, a three-way partitioning scheme dividing elements into less-than, equal-to, and greater-than regions) | `25.058 ms` | `75.871 ms` | **23.55x faster** | **14.57x faster** |
+| **6. Floyd Bottom-Up HeapSort** | Williams & Floyd (1964), in-place binary heap sort | `75.216 ms` | `126.038 ms` | **70.70x faster** | **24.21x faster** |
+
+---
+
+### 2. Per-Distribution Breakdown ($N = 1{,}000{,}000$ `i32` Elements)
 
 | Dataset Distribution | `latticesort` (ms) | `std::sort_unstable` (ms) | Speedup vs `std` | Active Stage |
 | :--- | ---: | ---: | ---: | :--- |
@@ -55,7 +180,7 @@ All benchmarks were compiled with `rustc 1.100.0` (`-C opt-level=3`, Link-Time O
 
 ---
 
-### 2. Large-Scale Benchmark Suite ($N = 10{,}000{,}000$ `i32` Elements)
+### 3. Large-Scale Benchmark Suite ($N = 10{,}000{,}000$ `i32` Elements)
 
 | Dataset Distribution ($N = 10\text{M}$) | `latticesort` (ms) | `std::sort_unstable` (ms) | Speedup vs `std` | Active Stage |
 | :--- | ---: | ---: | ---: | :--- |
@@ -72,9 +197,7 @@ All benchmarks were compiled with `rustc 1.100.0` (`-C opt-level=3`, Link-Time O
 
 ---
 
-### 3. Polymorphic Types (`LatticeSortExt`) at $N = 1{,}000{,}000$
-
-`LatticeSortExt` maps unsigned integers (`u32`, `u64`) via sign-bit flipping and IEEE (Institute of Electrical and Electronics Engineers, the standards body defining the 754 floating-point binary representation) 754 floating-point numbers (`f32`, `f64`) via total-order bijective bit projection (`mask = ((bits as i32 >> 31) as u32) & 0x7fff_ffff`).
+### 4. Polymorphic Types (`LatticeSortExt`) at $N = 1{,}000{,}000$
 
 | Type and Distribution ($N = 1\text{M}$) | `latticesort` (ms) | `std::sort_unstable` (ms) | Speedup vs `std` |
 | :--- | ---: | ---: | ---: |
@@ -87,9 +210,7 @@ All benchmarks were compiled with `rustc 1.100.0` (`-C opt-level=3`, Link-Time O
 
 ---
 
-### 4. Multi-Core Parallel Execution (`parallel::parallel_lattice_sort`)
-
-`parallel::parallel_lattice_sort` uses scoped threads (`std::thread::scope`) and disjoint mutable slice splitting (`split_at_mut`) with zero `unsafe` blocks and zero external dependencies.
+### 5. Multi-Core Parallel Execution (`parallel::parallel_lattice_sort`)
 
 | Uniform 32-Bit Scenario | `parallel_lattice_sort` (ms) | Single-Thread `latticesort` (ms) | `std::sort_unstable` (ms) | Speedup vs `std` |
 | :--- | ---: | ---: | ---: | ---: |
@@ -98,9 +219,7 @@ All benchmarks were compiled with `rustc 1.100.0` (`-C opt-level=3`, Link-Time O
 
 ---
 
-### 5. Red-Team Adversarial Falsification Suite ($N = 1{,}000{,}000$ and $N = 10{,}000{,}000$)
-
-Nine pathological distributions were engineered to attack probe sampling, hash collisions, sentinel values (`0`, `1`, `-1`, `i32::MIN`, `i32::MAX`), and cutoff boundaries:
+### 6. Red-Team Adversarial Falsification Suite ($N = 1{,}000{,}000$ and $N = 10{,}000{,}000$)
 
 | Adversarial Attack Vector | $N = 1\text{M}$ Speedup vs `std` | $N = 10\text{M}$ Speedup vs `std` | Verdict |
 | :--- | ---: | ---: | :--- |
@@ -145,6 +264,9 @@ fn main() {
 # Primary 1,000,000-element benchmark suite (9 distributions)
 cargo run --release --bin latticesort
 
+# Comparison against 6 sorting algorithms from Computer Science literature
+cargo run --release --bin bench_literature
+
 # Red-team adversarial falsification suite (1,000,000 elements)
 cargo run --release --bin adversarial
 
@@ -157,9 +279,6 @@ cargo run --release --bin bench_fronts_3_4
 
 ---
 
-## Code Quality and Style Conformance
+## Interactive 3D Visualization (Three.js r187)
 
-This crate adheres strictly to the [Google Rust Style Guide](https://google.github.io/styleguide/rustguide.html):
-- Zero `unsafe` blocks and zero unstable features.
-- Flat leaf-module architecture (`src/lib.rs` contains only crate documentation, module declarations, and public re-exports).
-- Enforced `#![warn(missing_docs)]` and zero Clippy warnings (`cargo clippy --all-targets -- -D warnings`).
+An interactive 3D WebGL visualizer of the internal stages of `latticesort` is included in `viz/index.html`. Serve the repository root with any local static server to explore the 3D scene in your browser.
