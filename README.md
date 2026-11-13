@@ -210,12 +210,13 @@ Executed via `cargo run --release --bin bench_literature` across all 9 benchmark
 
 ---
 
-### 5. Multi-Core Parallel Execution (`parallel::parallel_lattice_sort`)
+### 5. Multi-Core Parallel Execution (`parallel::parallel_lattice_sort`) and 1-Billion-Element Scale ($4.00\text{ GB}$)
 
-| Uniform 32-Bit Scenario | `parallel_lattice_sort` (ms) | Single-Thread `latticesort` (ms) | `std::sort_unstable` (ms) | Speedup vs `std` |
-| :--- | ---: | ---: | ---: | ---: |
-| $N = 1{,}000{,}000$ | `3.04` | `5.41` | `14.52` | **4.77x** |
-| $N = 10{,}000{,}000$ | `32.03` | `64.87` | `161.84` | **5.05x** |
+| Uniform 32-Bit Scenario | `parallel_lattice_sort` | Single-Thread `latticesort` | `std::sort_unstable` (`ipnsort`) | Parallel Speedup vs `std` | Single-Thread Speedup vs `std` |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| $N = 1{,}000{,}000$ ($4\text{ MB}$) | `3.04 ms` | `5.41 ms` | `14.52 ms` | **4.77x** | **2.68x** |
+| $N = 10{,}000{,}000$ ($40\text{ MB}$) | `32.03 ms` | `64.87 ms` | `161.84 ms` | **5.05x** | **2.49x** |
+| **$N = 1{,}000{,}000{,}000$ ($4.00\text{ GB}$)** | **`2.913 s` (`343.2M/s`)** | **`7.966 s` (`125.5M/s`)** | **`22.371 s` (`44.7M/s`)** | **7.68x** | **2.81x** |
 
 ---
 
@@ -275,6 +276,9 @@ cargo run --release --bin bench_10m
 
 # Polymorphic types (u32, i64, u64, f32, f64) and multi-core parallel benchmark
 cargo run --release --bin bench_fronts_3_4
+
+# 1-Billion-element (4.00 GB) uniform 32-bit random benchmark
+cargo run --release --bin bench_1b
 ```
 
 ---

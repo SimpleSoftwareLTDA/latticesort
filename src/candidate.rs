@@ -475,14 +475,122 @@ pub fn scatter_pass<const SHIFT: usize, const FLIP_SIGN: bool>(
     }
 }
 
+/// Sorts an L1/L2-local sub-bucket on its lower 16 bits (Byte 0 and Byte 1) when the input
+/// initially resides in `slice_sub` and the final sorted output must be in `slice_sub`.
+fn l2_local_2pass_radix_sort(slice_sub: &mut [i32], scratch_sub: &mut [i32]) {
+    let len = slice_sub.len();
+    if len <= SMALL_SORT_CUTOFF {
+        if len > 1 {
+            in_place_small_sort(slice_sub);
+        }
+        return;
+    }
+
+    let mut h0 = [0_u32; 256];
+    let mut h1 = [0_u32; 256];
+
+    let (chunks, remainder) = slice_sub.as_chunks::<4>();
+    for chunk in chunks {
+        let u0 = chunk[0] as u32;
+        let u1 = chunk[1] as u32;
+        let u2 = chunk[2] as u32;
+        let u3 = chunk[3] as u32;
+
+        h0[(u0 & 0xff) as usize] += 1;
+        h1[((u0 >> 8) & 0xff) as usize] += 1;
+
+        h0[(u1 & 0xff) as usize] += 1;
+        h1[((u1 >> 8) & 0xff) as usize] += 1;
+
+        h0[(u2 & 0xff) as usize] += 1;
+        h1[((u2 >> 8) & 0xff) as usize] += 1;
+
+        h0[(u3 & 0xff) as usize] += 1;
+        h1[((u3 >> 8) & 0xff) as usize] += 1;
+    }
+    for &x in remainder {
+        let u = x as u32;
+        h0[(u & 0xff) as usize] += 1;
+        h1[((u >> 8) & 0xff) as usize] += 1;
+    }
+
+    let n32 = len as u32;
+    let mut in_scratch = false;
+
+    if !h0.contains(&n32) {
+        scatter_pass::<0, false>(slice_sub, scratch_sub, &h0);
+        in_scratch = true;
+    }
+    if !h1.contains(&n32) {
+        if in_scratch {
+            scatter_pass::<8, false>(scratch_sub, slice_sub, &h1);
+            in_scratch = false;
+        } else {
+            scatter_pass::<8, false>(slice_sub, scratch_sub, &h1);
+            in_scratch = true;
+        }
+    }
+
+    if in_scratch {
+        slice_sub.copy_from_slice(scratch_sub);
+    }
+}
+
 /// Sorts an L2-resident bucket on its lower 24 bits (3 passes of 8-bit LSD radix sort)
 /// when the input initially resides in `scratch_bucket` and the final output must be in `slice_bucket`.
+/// For very large buckets (`len > 262_144`, as in 100M to 1B element sorts), partitions by Byte 2
+/// first so that Byte 0 and Byte 1 passes remain strictly inside L1/L2 cache.
 pub fn l2_local_3pass_radix_sort(slice_bucket: &mut [i32], scratch_bucket: &mut [i32]) {
     let len = scratch_bucket.len();
     if len <= SMALL_SORT_CUTOFF {
         slice_bucket.copy_from_slice(scratch_bucket);
         if len > 1 {
             in_place_small_sort(slice_bucket);
+        }
+        return;
+    }
+
+    if len > 262_144 {
+        let mut h2 = [0_u32; 256];
+        let (chunks, remainder) = scratch_bucket.as_chunks::<4>();
+        for chunk in chunks {
+            h2[((chunk[0] as u32 >> 16) & 0xff) as usize] += 1;
+            h2[((chunk[1] as u32 >> 16) & 0xff) as usize] += 1;
+            h2[((chunk[2] as u32 >> 16) & 0xff) as usize] += 1;
+            h2[((chunk[3] as u32 >> 16) & 0xff) as usize] += 1;
+        }
+        for &x in remainder {
+            h2[((x as u32 >> 16) & 0xff) as usize] += 1;
+        }
+
+        let n32 = len as u32;
+        if h2.contains(&n32) {
+            slice_bucket.copy_from_slice(scratch_bucket);
+            l2_local_2pass_radix_sort(slice_bucket, scratch_bucket);
+            return;
+        }
+
+        let mut sub_starts = [0_usize; 256];
+        let mut sum = 0_usize;
+        let indexed_h2 = h2.iter().enumerate();
+        for (i, &count) in indexed_h2 {
+            sub_starts[i] = sum;
+            sum += count as usize;
+        }
+
+        scatter_pass::<16, false>(scratch_bucket, slice_bucket, &h2);
+
+        for b in 0..256 {
+            let count = h2[b] as usize;
+            if count <= 1 {
+                continue;
+            }
+            let start = sub_starts[b];
+            let end = start + count;
+            l2_local_2pass_radix_sort(
+                &mut slice_bucket[start..end],
+                &mut scratch_bucket[start..end],
+            );
         }
         return;
     }
