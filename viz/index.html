@@ -1,0 +1,1084 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LatticeSort 3D: Visualizador Arquitetural em Three.js</title>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.187.0/examples/jsm/"
+      }
+    }
+  </script>
+  <style>
+    .viz-stage-shell {
+      content-visibility: auto;
+      contain-intrinsic-size: auto none auto 640px;
+    }
+
+    [role="toolbar"] button {
+      min-inline-size: 28px;
+      min-block-size: 28px;
+    }
+
+    [role="toolbar"] button:focus-visible {
+      outline: 2px solid #38bdf8;
+      outline-offset: 2px;
+    }
+
+    [role="toolbar"] button[aria-pressed="true"] {
+      background-color: #0284c7;
+      color: #ffffff;
+      box-shadow: inset 0 0 0 1px #7dd3fc;
+    }
+
+    [role="separator"] {
+      border-inline-start: 1px solid rgba(148, 163, 184, 0.35);
+      block-size: 1.5rem;
+    }
+
+    @media (pointer: coarse) {
+      [role="toolbar"] button {
+        min-inline-size: 40px;
+        min-block-size: 40px;
+      }
+    }
+
+    @media (forced-colors: active) {
+      [role="toolbar"] button[aria-pressed="true"] {
+        background-color: Highlight;
+        color: HighlightText;
+      }
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 antialiased selection:bg-sky-500 selection:text-white">
+  <main class="max-w-7xl mx-auto p-4 md:p-6 space-y-4">
+    <!-- Header Banner (Ray Edwards style: clear promise, concrete proof, zero fluff) -->
+    <header class="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 shadow-lg flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+      <div class="space-y-1">
+        <div class="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-sky-500/10 border border-sky-500/30 text-sky-300 text-xs font-medium">
+          <span>Three.js r187 WebGL (Web Graphics Library, interface gráfica 3D acelerada por hardware no navegador) + InstancedMesh</span>
+        </div>
+        <h1 class="text-xl md:text-2xl font-bold tracking-tight text-white">
+          Veja Como o LatticeSort Ordena 4.98x Mais Rápido que a Biblioteca Padrão do Rust
+        </h1>
+        <p class="text-slate-300 text-sm max-w-3xl">
+          Enquanto algoritmos tradicionais comparam elementos um a um, o LatticeSort inspeciona a geometria dos dados, agrega chaves repetidas direto na cache L1 e salta bytes constantes sem mover memória.
+        </p>
+      </div>
+      <div class="grid grid-cols-3 gap-2.5 shrink-0">
+        <div class="bg-slate-950/90 border border-slate-800 rounded-xl px-3.5 py-2.5 text-center">
+          <div class="text-xs text-slate-400">Speedup 1M (Geomean)</div>
+          <div class="text-lg font-bold text-emerald-400">4.98x</div>
+        </div>
+        <div class="bg-slate-950/90 border border-slate-800 rounded-xl px-3.5 py-2.5 text-center">
+          <div class="text-xs text-slate-400">Speedup 10M (Paralelo)</div>
+          <div class="text-lg font-bold text-sky-400">5.05x</div>
+        </div>
+        <div class="bg-slate-950/90 border border-slate-800 rounded-xl px-3.5 py-2.5 text-center">
+          <div class="text-xs text-slate-400">Blocos Unsafe</div>
+          <div class="text-lg font-bold text-amber-300">Zero</div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Accessible Toolbar following modern-web-guidance `toolbar` specification -->
+    <section class="bg-slate-900/90 border border-slate-800 rounded-2xl p-3.5 shadow-md space-y-3">
+      <div
+        id="viz-toolbar"
+        role="toolbar"
+        focusgroup="toolbar wrap"
+        aria-label="Controles de estágio e reprodução do LatticeSort 3D"
+        aria-controls="webgl-stage-container"
+        class="flex flex-wrap items-center gap-2"
+      >
+        <div role="group" aria-label="Seleção do Estágio do Algoritmo" class="flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            data-stage="bitonic"
+            aria-pressed="true"
+            class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 text-slate-200 border border-slate-700"
+            title="Estágio 1: Fusão Linear de Runs Bitônicos"
+          >
+            1. Fusão Bitônica O(n)
+          </button>
+          <button
+            type="button"
+            data-stage="sentinel"
+            aria-pressed="false"
+            class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 text-slate-200 border border-slate-700"
+            title="Estágio 2: Agregação Hash L1 com Sentinela Dupla"
+          >
+            2. Hash L1 Sentinela Dupla
+          </button>
+          <button
+            type="button"
+            data-stage="dense"
+            aria-pressed="false"
+            class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 text-slate-200 border border-slate-700"
+            title="Estágio 3: Contagem por Deslocamento em Intervalo Denso"
+          >
+            3. Contagem Densa L2
+          </button>
+          <button
+            type="button"
+            data-stage="radix"
+            aria-pressed="false"
+            class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 text-slate-200 border border-slate-700"
+            title="Estágio 4: Radix LSD com Histograma Fundido e Salto de Bytes"
+          >
+            4. Radix Fundido + Skip
+          </button>
+        </div>
+
+        <span role="separator" aria-orientation="vertical" class="mx-1"></span>
+
+        <div role="group" aria-label="Controle de Simulação" class="flex items-center gap-1.5">
+          <button
+            type="button"
+            id="btn-play-pause"
+            aria-pressed="true"
+            class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 text-slate-200 border border-slate-700"
+            title="Executar ou pausar a animação em tempo real"
+          >
+            Simulação Ativa
+          </button>
+          <button
+            type="button"
+            id="btn-step"
+            class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 text-slate-200 border border-slate-700"
+            title="Avançar para a próxima subfase do estágio atual"
+          >
+            Avançar Fase
+          </button>
+          <button
+            type="button"
+            id="btn-reset"
+            class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 text-slate-200 border border-slate-700"
+            title="Reiniciar fatia de entrada deste estágio"
+          >
+            Reiniciar Fatia
+          </button>
+        </div>
+
+        <span role="separator" aria-orientation="vertical" class="mx-1"></span>
+
+        <div role="group" aria-label="Ângulo de Câmera 3D" class="flex items-center gap-1.5">
+          <button
+            type="button"
+            data-cam="iso"
+            aria-pressed="true"
+            class="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-slate-800 text-slate-200 border border-slate-700"
+            title="Visão Isométrica do Lattice 3D"
+          >
+            Câmera Isométrica
+          </button>
+          <button
+            type="button"
+            data-cam="top"
+            aria-pressed="false"
+            class="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-slate-800 text-slate-200 border border-slate-700"
+            title="Visão Superior da Cache L1/L2"
+          >
+            Mapa Superior
+          </button>
+          <button
+            type="button"
+            data-cam="front"
+            aria-pressed="false"
+            class="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-slate-800 text-slate-200 border border-slate-700"
+            title="Visão Frontal de Amplitude"
+          >
+            Perfil Frontal
+          </button>
+        </div>
+      </div>
+
+      <!-- Live status region outside toolbar as required by `toolbar` guide -->
+      <div class="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-800/80 text-xs">
+        <p id="toolbar-live-status" role="status" class="text-sky-300 font-medium">
+          Estágio 1 ativo: `try_bitonic_run_merge` inspecionando 8 âncoras e fundindo duas rampas monotônicas em passagem única.
+        </p>
+        <div class="flex items-center gap-3 text-slate-400">
+          <label for="speed-range" class="font-medium text-slate-300">Velocidade:</label>
+          <input
+            id="speed-range"
+            type="range"
+            min="0.4"
+            max="2.5"
+            step="0.1"
+            value="1.0"
+            class="w-24 accent-sky-400"
+          />
+          <span id="speed-val" class="text-slate-200 font-mono">1.0x</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3D Viewport + Architectural Telemetry Grid -->
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
+      <!-- Three.js Canvas Container -->
+      <div
+        id="webgl-stage-container"
+        class="viz-stage-shell lg:col-span-8 relative bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl"
+        style="height: 520px;"
+      >
+        <canvas id="three-canvas" class="w-full h-full block cursor-grab active:cursor-grabbing"></canvas>
+
+        <!-- Floating Phase Stepper Overlay -->
+        <div class="absolute top-3 left-3 right-3 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
+          <div class="bg-slate-950/85 backdrop-blur-md border border-slate-800 rounded-xl px-3.5 py-2 shadow-lg">
+            <div id="hud-stage-name" class="text-xs font-bold uppercase tracking-wider text-sky-400">
+              ESTÁGIO 1: TRY_BITONIC_RUN_MERGE
+            </div>
+            <div id="hud-phase-title" class="text-sm font-semibold text-white">
+              Fase 1/3: Sondagem de 8 Pontos de Inflexão
+            </div>
+          </div>
+
+          <div class="bg-slate-950/85 backdrop-blur-md border border-slate-800 rounded-xl px-3.5 py-2 shadow-lg flex items-center gap-4">
+            <div>
+              <div class="text-xs text-slate-400">Tempo LatticeSort</div>
+              <div id="hud-cand-time" class="text-sm font-mono font-bold text-emerald-400">0.625 ms</div>
+            </div>
+            <div>
+              <div class="text-xs text-slate-400">Tempo std::sort_unstable</div>
+              <div id="hud-std-time" class="text-sm font-mono font-semibold text-rose-400">1.835 ms</div>
+            </div>
+            <div>
+              <div class="text-xs text-slate-400">Ganho Medido</div>
+              <div id="hud-speedup" class="text-sm font-mono font-bold text-sky-300">2.93x</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Bottom Color Legend Overlay -->
+        <div class="absolute bottom-3 left-3 right-3 bg-slate-950/85 backdrop-blur-md border border-slate-800 rounded-xl px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs pointer-events-none">
+          <div class="flex flex-wrap items-center gap-4">
+            <span class="inline-flex items-center gap-1.5">
+              <span class="w-2.5 h-2.5 rounded-full bg-sky-400"></span>
+              <span class="text-slate-300">Elementos na Fatia</span>
+            </span>
+            <span class="inline-flex items-center gap-1.5">
+              <span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
+              <span class="text-slate-300">Sonda / Sentinela / Ponteiro Ativo</span>
+            </span>
+            <span class="inline-flex items-center gap-1.5">
+              <span class="w-2.5 h-2.5 rounded-full bg-purple-400"></span>
+              <span class="text-slate-300">Tabela L1 / Histograma Fundido</span>
+            </span>
+            <span class="inline-flex items-center gap-1.5">
+              <span class="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
+              <span class="text-slate-300">Ordenado Definitivo</span>
+            </span>
+          </div>
+          <span class="text-slate-400">Arraste para orbitar 3D | Scroll para zoom</span>
+        </div>
+      </div>
+
+      <!-- Right Sidebar: Mechanical Breakdown of the Active Stage -->
+      <aside class="lg:col-span-4 bg-slate-900/90 border border-slate-800 rounded-2xl p-5 flex flex-col justify-between space-y-4">
+        <div class="space-y-4">
+          <div>
+            <span id="side-badge" class="inline-block px-2.5 py-0.5 rounded-md bg-sky-500/15 text-sky-300 text-xs font-mono font-semibold">
+              src/candidate.rs :: try_bitonic_run_merge
+            </span>
+            <h2 id="side-title" class="text-lg font-bold text-white mt-1.5">
+              Fusão de Envelopes Bitônicos e Prefixos Ordenados
+            </h2>
+            <p id="side-desc" class="text-xs text-slate-300 mt-1 leading-relaxed">
+              Séries temporais, janelas deslizantes e ondas físicas frequentemente sobem até um pico e descem (ou vice-versa). O LatticeSort detecta essa estrutura em 8 leituras e funde as duas metades com dois ponteiros opostos em tempo linear.
+            </p>
+          </div>
+
+          <!-- 3 Phase Cards -->
+          <div class="space-y-2" id="phase-cards-list">
+            <div data-phase-card="0" class="p-3 rounded-xl border border-sky-500/60 bg-slate-950/90 transition-colors">
+              <div class="text-xs font-bold text-sky-300" id="card-0-title">
+                Fase 1: Filtro Rápido de 8 Pontos
+              </div>
+              <p class="text-xs text-slate-300 mt-0.5" id="card-0-body">
+                Amostra 8 posições espaçadas em N/8. Se houver mais de 1 mudança de direção, aborta em O(1) sem tocar no restante do array.
+              </p>
+            </div>
+            <div data-phase-card="1" class="p-3 rounded-xl border border-slate-800 bg-slate-950/50 transition-colors">
+              <div class="text-xs font-bold text-slate-200" id="card-1-title">
+                Fase 2: Localização do Pico ou Vale + Snap-Back
+              </div>
+              <p class="text-xs text-slate-400 mt-0.5" id="card-1-body">
+                Identifica o ponto exato de inflexão (crista ou vale) e recua sobre platôs constantes para preservar blocos idênticos.
+              </p>
+            </div>
+            <div data-phase-card="2" class="p-3 rounded-xl border border-slate-800 bg-slate-950/50 transition-colors">
+              <div class="text-xs font-bold text-slate-200" id="card-2-title">
+                Fase 3: Fusão Cruzada em Passagem Única O(n)
+              </div>
+              <p class="text-xs text-slate-400 mt-0.5" id="card-2-body">
+                O ponteiro esquerdo avança do início e o direito recua do fim, produzindo a fatia ordenada em 0.625 ms para 1 milhão de chaves.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Hardware & Complexity Comparison Box -->
+        <div class="bg-slate-950 border border-slate-800 rounded-xl p-3.5 space-y-2 text-xs">
+          <div class="font-semibold text-slate-200 border-b border-slate-800 pb-1.5">
+            Invariantes de Hardware neste Estágio
+          </div>
+          <div class="flex justify-between">
+            <span class="text-slate-400">Complexidade Temporal:</span>
+            <span id="metric-complexity" class="font-mono text-emerald-400 font-semibold">O(n) linear</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-slate-400">Pegada de Cache Primária:</span>
+            <span id="metric-cache" class="font-mono text-sky-300">Streaming Sequencial L1</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-slate-400">Passagens sobre a Fatia:</span>
+            <span id="metric-passes" class="font-mono text-amber-300">1 leitura + 1 fusão</span>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    // 1. Roving-tabindex fallback when native `focusgroup` is not supported (`modern-web-guidance: toolbar`)
+    const toolbarEl = document.getElementById('viz-toolbar');
+    const toolbarItems = Array.from(toolbarEl.querySelectorAll('button'));
+    if (!('focusGroup' in HTMLElement.prototype)) {
+      toolbarItems.forEach((btn, idx) => {
+        btn.tabIndex = idx === 0 ? 0 : -1;
+      });
+      toolbarEl.addEventListener('focusin', ({ target }) => {
+        if (toolbarItems.includes(target)) {
+          toolbarItems.forEach((btn) => {
+            btn.tabIndex = btn === target ? 0 : -1;
+          });
+        }
+      });
+      toolbarEl.addEventListener('keydown', (event) => {
+        const currentIndex = toolbarItems.indexOf(document.activeElement);
+        if (currentIndex === -1) return;
+        const rtl = getComputedStyle(toolbarEl).direction === 'rtl';
+        const steps = { ArrowRight: rtl ? -1 : 1, ArrowLeft: rtl ? 1 : -1 };
+        if (event.key in steps) {
+          event.preventDefault();
+          const nextIndex = (currentIndex + steps[event.key] + toolbarItems.length) % toolbarItems.length;
+          toolbarItems[nextIndex].focus();
+        } else if (event.key === 'Home') {
+          event.preventDefault();
+          toolbarItems[0].focus();
+        } else if (event.key === 'End') {
+          event.preventDefault();
+          toolbarItems[toolbarItems.length - 1].focus();
+        }
+      });
+    }
+
+    // 2. Stage Metadata Definitions
+    const STAGE_SPECS = {
+      bitonic: {
+        hudName: 'ESTÁGIO 1: TRY_BITONIC_RUN_MERGE',
+        badge: 'src/candidate.rs :: try_bitonic_run_merge',
+        title: 'Fusão de Envelopes Bitônicos e Prefixos Ordenados',
+        desc: 'Séries temporais, janelas deslizantes e ondas físicas frequentemente sobem até um pico e descem (ou vice-versa). O LatticeSort detecta essa estrutura em 8 leituras e funde as duas metades com dois ponteiros opostos em tempo linear.',
+        candTime: '0.625 ms',
+        stdTime: '1.835 ms',
+        speedup: '2.93x',
+        complexity: 'O(n) linear',
+        cache: 'Streaming Sequencial L1',
+        passes: '1 leitura + 1 fusão',
+        phases: [
+          {
+            title: 'Fase 1/3: Filtro Rápido de 8 Pontos',
+            cardTitle: 'Fase 1: Filtro Rápido de 8 Pontos',
+            cardBody: 'Amostra 8 posições espaçadas em N/8. Se houver mais de 1 mudança de direção, aborta em O(1) sem tocar no restante do array.'
+          },
+          {
+            title: 'Fase 2/3: Detecção do Pico Bitônico e Snap-Back',
+            cardTitle: 'Fase 2: Localização do Pico ou Vale + Snap-Back',
+            cardBody: 'Identifica o ponto exato de inflexão (crista ou vale) e recua sobre platôs constantes para preservar blocos idênticos.'
+          },
+          {
+            title: 'Fase 3/3: Fusão Linear com Dois Ponteiros Opostos',
+            cardTitle: 'Fase 3: Fusão Cruzada em Passagem Única O(n)',
+            cardBody: 'O ponteiro esquerdo avança do início e o direito recua do fim, produzindo a fatia ordenada em 0.625 ms para 1 milhão de chaves.'
+          }
+        ]
+      },
+      sentinel: {
+        hudName: 'ESTÁGIO 2: TRY_SENTINEL_HASH_AGGREGATION',
+        badge: 'src/candidate.rs :: try_sentinel_hash_aggregation',
+        title: 'Agregação Hash Direta na Cache L1 com Sentinela Dupla',
+        desc: 'Quando a fatia possui até 384 chaves distintas, uma tabela de 1024 slots na pilha (L1) conta a frequência exata de cada chave. A sentinela dupla (d0 = 0 e d1 = 1 no slot s0) elimina a checagem de bitmap no laço principal.',
+        candTime: '0.761 ms',
+        stdTime: '2.862 ms',
+        speedup: '3.76x',
+        complexity: 'O(n + K log K), K <= 384',
+        cache: 'Tabela 1024 Slots na Pilha (8 KB em L1)',
+        passes: '1 agregação + 1 escrita fill()',
+        phases: [
+          {
+            title: 'Fase 1/3: Sonda de 5 Quartis + Passo Áureo e Sentinela Dupla',
+            cardTitle: 'Fase 1: Sondagem Híbrida e Sentinela Dupla',
+            cardBody: 'Coleta 5 janelas de 16 elementos mais 48 amostras em passo áureo, escolhe o multiplicador hash sem colisão e planta d1 no slot s0 = hash(0).'
+          },
+          {
+            title: 'Fase 2/3: Acumulação Direta nos Cristais da Cache L1',
+            cardTitle: 'Fase 2: Contagem Direta keys[s] == val',
+            cardBody: 'Cada elemento da fatia vai direto para seu slot na grade L1 (torres roxas e douradas), incrementando counts[s] sem desvios de árvore.'
+          },
+          {
+            title: 'Fase 3/3: Emissão Contígua via slice.fill()',
+            cardTitle: 'Fase 3: Reconstrução Contígua das Chaves',
+            cardBody: 'Ordena apenas as chaves ativas (<= 384) e preenche a fatia final em blocos contíguos de memória.'
+          }
+        ]
+      },
+      dense: {
+        hudName: 'ESTÁGIO 3: TRY_DENSE_RANGE_COUNT',
+        badge: 'src/candidate.rs :: try_dense_range_count',
+        title: 'Contagem por Deslocamento em Intervalo Denso',
+        desc: 'Pré-filtrado a custo zero pela amplitude da sonda do Estágio 2. Quando max - min cabe no horizonte de cache (até 1.048.576), projeta cada chave diretamente em density[x - min] e reconstrói a fatia em tempo linear.',
+        candTime: '1.148 ms',
+        stdTime: '12.660 ms',
+        speedup: '11.03x',
+        complexity: 'O(n + span)',
+        cache: 'Histograma de Densidade em L2/L3',
+        passes: '1 contagem + 1 varredura densa',
+        phases: [
+          {
+            title: 'Fase 1/3: Verificação do Horizonte de Amplitude (max - min)',
+            cardTitle: 'Fase 1: Pré-Filtro de Amplitude e Base Mínima',
+            cardBody: 'Determina min_val e max_val. Se max - min <= min(n, 1_048_576), aloca o vetor de densidade ajustado à janela real.'
+          },
+          {
+            title: 'Fase 2/3: Projeção Baricêntrica density[x - min] += 1',
+            cardTitle: 'Fase 2: Acumulação de Densidade por Deslocamento',
+            cardBody: 'Concentra distribuições Pareto e sensores inteiros em contadores adjacentes na cache L2.'
+          },
+          {
+            title: 'Fase 3/3: Colapso Ordenado em Tempo Linear',
+            cardTitle: 'Fase 3: Escrita Linear Direta (11.03x mais rápida)',
+            cardBody: 'Percorre o vetor de densidade uma única vez e grava os elementos ordenados sem nenhuma comparação entre chaves.'
+          }
+        ]
+      },
+      radix: {
+        hudName: 'ESTÁGIO 4: RADIX_LSD_FUSED_SORT + BYTE SKIP',
+        badge: 'src/candidate.rs :: radix_lsd_fused_sort',
+        title: 'Radix Sort 4x8-Bit com Histograma Fundido e Salto de Bytes',
+        desc: 'Para chaves de alta entropia em 32 ou 64 bits, constrói todos os histogramas de 256 baldes em uma única leitura desenrolada em blocos de 4 (as_chunks::<4>()) e salta automaticamente qualquer byte constante.',
+        candTime: '5.206 ms',
+        stdTime: '14.236 ms',
+        speedup: '2.73x',
+        complexity: 'O(p * n), p <= 4 passagens',
+        cache: '4x256 Contadores em L1 + Partições MSB em L2',
+        passes: '1 histograma fundido + passagens ativas',
+        phases: [
+          {
+            title: 'Fase 1/3: Histograma 4x256 Fundido em Passagem Única',
+            cardTitle: 'Fase 1: Varredura Quádrupla as_chunks::<4>()',
+            cardBody: 'Uma única leitura da fatia popula simultaneamente os 4 anéis de histograma (Bytes 0, 1, 2 e 3 com bit de sinal invertido ^ 0x80).'
+          },
+          {
+            title: 'Fase 2/3: Detecção e Salto de Bytes Degenerados (Entropia Zero)',
+            cardTitle: 'Fase 2: Bypass Instantâneo hist.contains(&n)',
+            cardBody: 'Se qualquer byte possui todos os N elementos no mesmo balde (como os bytes altos de timestamps ou inteiros limitados), a passagem inteira é saltada em 0 ms.'
+          },
+          {
+            title: 'Fase 3/3: Scatter Ping-Pong nas Camadas Ativas',
+            cardTitle: 'Fase 3: Distribuição Determinística por Prefixos',
+            cardBody: 'Executa scatter_pass apenas nos bytes com entropia real, finalizando a ordenação sem ramificações.'
+          }
+        ]
+      }
+    };
+
+    // 3. Three.js Scene, Camera, Renderer, and OrbitControls Setup
+    const container = document.getElementById('webgl-stage-container');
+    const canvas = document.getElementById('three-canvas');
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x090d16);
+    scene.fog = new THREE.FogExp2(0x090d16, 0.012);
+
+    const camera = new THREE.PerspectiveCamera(
+      48,
+      container.clientWidth / container.clientHeight,
+      0.1,
+      250
+    );
+    const cameraTargetPos = new THREE.Vector3(0, 16, 34);
+    const cameraLookAt = new THREE.Vector3(0, 3, 0);
+    camera.position.copy(cameraTargetPos);
+
+    const renderer = new THREE.WebGLRenderer({
+      canvas,
+      antialias: true,
+      powerPreference: 'high-performance'
+    });
+    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.06;
+    controls.target.copy(cameraLookAt);
+    controls.maxPolarAngle = Math.PI * 0.48;
+    controls.minDistance = 12;
+    controls.maxDistance = 75;
+
+    // 4. Lighting & Reference Lattice Floor
+    const ambientLight = new THREE.AmbientLight(0xdbeafe, 0.75);
+    scene.add(ambientLight);
+
+    const keyLight = new THREE.DirectionalLight(0xffffff, 1.6);
+    keyLight.position.set(18, 32, 22);
+    scene.add(keyLight);
+
+    const rimLight = new THREE.DirectionalLight(0x38bdf8, 0.9);
+    rimLight.position.set(-22, 16, -18);
+    scene.add(rimLight);
+
+    const gridHelper = new THREE.GridHelper(56, 28, 0x1e293b, 0x0f172a);
+    gridHelper.position.y = -0.05;
+    scene.add(gridHelper);
+
+    // 5. InstancedMesh for the 96 Data Elements + 64 Lattice / Histogram Towers
+    const ELEMENT_COUNT = 96;
+    const LATTICE_CELLS = 64; // 8x8 L1 Hash / Radix Bucket Grid
+
+    const barGeometry = new THREE.BoxGeometry(0.32, 1.0, 0.32);
+    // Shift geometry so y=0 is the base of each bar
+    barGeometry.translate(0, 0.5, 0);
+    const barMaterial = new THREE.MeshStandardMaterial({
+      roughness: 0.25,
+      metalness: 0.35
+    });
+    const elementMesh = new THREE.InstancedMesh(barGeometry, barMaterial, ELEMENT_COUNT);
+    scene.add(elementMesh);
+
+    const cellGeometry = new THREE.BoxGeometry(0.95, 1.0, 0.95);
+    cellGeometry.translate(0, 0.5, 0);
+    const cellMaterial = new THREE.MeshStandardMaterial({
+      roughness: 0.2,
+      metalness: 0.45,
+      transparent: true,
+      opacity: 0.9
+    });
+    const latticeMesh = new THREE.InstancedMesh(cellGeometry, cellMaterial, LATTICE_CELLS);
+    scene.add(latticeMesh);
+
+    // Dynamic trajectory arc line connecting active elements to lattice cells
+    const MAX_ARC_POINTS = 120;
+    const arcPositions = new Float32Array(MAX_ARC_POINTS * 3);
+    const arcGeometry = new THREE.BufferGeometry();
+    arcGeometry.setAttribute('position', new THREE.BufferAttribute(arcPositions, 3));
+    const arcMaterial = new THREE.LineBasicMaterial({
+      color: 0xfbbf24,
+      transparent: true,
+      opacity: 0.75
+    });
+    const arcLine = new THREE.Line(arcGeometry, arcMaterial);
+    scene.add(arcLine);
+
+    // 6. State Management for the 4 Stages
+    let currentStage = 'bitonic';
+    let currentPhase = 0;
+    let phaseProgress = 0;
+    let isPlaying = true;
+    let speedMultiplier = 1.0;
+
+    const initialValues = new Float32Array(ELEMENT_COUNT);
+    const sortedValues = new Float32Array(ELEMENT_COUNT);
+    const bucketAssignments = new Uint8Array(ELEMENT_COUNT);
+    const latticeCounts = new Float32Array(LATTICE_CELLS);
+
+    const dummyMatrix = new THREE.Matrix4();
+    const dummyPos = new THREE.Vector3();
+    const dummyScale = new THREE.Vector3();
+    const dummyQuat = new THREE.Quaternion();
+    const tempColor = new THREE.Color();
+
+    const COLOR_DEFAULT = new THREE.Color(0x38bdf8);
+    const COLOR_PROBE = new THREE.Color(0xfbbf24);
+    const COLOR_LATTICE = new THREE.Color(0xa855f7);
+    const COLOR_SORTED = new THREE.Color(0x34d399);
+    const COLOR_SKIPPED = new THREE.Color(0x475569);
+
+    function populateStageData(stageKey) {
+      latticeCounts.fill(0);
+      if (stageKey === 'bitonic') {
+        const peakIdx = Math.floor(ELEMENT_COUNT * 0.56);
+        for (let i = 0; i < ELEMENT_COUNT; i++) {
+          if (i <= peakIdx) {
+            initialValues[i] = 1.2 + (i / peakIdx) * 11.0;
+          } else {
+            const remRatio = (i - peakIdx) / (ELEMENT_COUNT - 1 - peakIdx);
+            initialValues[i] = 12.2 - remRatio * 10.8;
+          }
+          bucketAssignments[i] = i % 8;
+        }
+      } else if (stageKey === 'sentinel') {
+        const distinctHeights = [1.5, 2.4, 3.3, 4.2, 5.1, 6.0, 6.9, 7.8, 8.7, 9.6, 10.5, 11.4, 12.3];
+        const distinctSlots = [3, 7, 12, 18, 22, 27, 31, 36, 41, 46, 52, 57, 61];
+        let seed = 1337;
+        for (let i = 0; i < ELEMENT_COUNT; i++) {
+          seed = (seed * 1664525 + 1013904223) >>> 0;
+          const k = seed % distinctHeights.length;
+          initialValues[i] = distinctHeights[k];
+          bucketAssignments[i] = distinctSlots[k];
+          latticeCounts[distinctSlots[k]] += 1;
+        }
+      } else if (stageKey === 'dense') {
+        let seed = 271828;
+        for (let i = 0; i < ELEMENT_COUNT; i++) {
+          seed = (seed * 1664525 + 1013904223) >>> 0;
+          // Pareto-like dense cluster across 32 offset buckets
+          const raw = Math.floor(Math.pow((seed % 1000) / 1000, 1.8) * 31);
+          initialValues[i] = 1.4 + raw * 0.35;
+          bucketAssignments[i] = raw;
+          latticeCounts[raw] += 1;
+        }
+      } else {
+        // Radix 4-pass with Byte 2 constant (degenerate byte skipped)
+        let seed = 314159;
+        for (let i = 0; i < ELEMENT_COUNT; i++) {
+          seed = (seed * 1664525 + 1013904223) >>> 0;
+          const val = 1.2 + ((seed % 1000) / 1000) * 11.2;
+          initialValues[i] = val;
+          bucketAssignments[i] = Math.floor(((val - 1.2) / 11.2) * 15);
+        }
+      }
+
+      const copy = Array.from(initialValues).sort((a, b) => a - b);
+      for (let i = 0; i < ELEMENT_COUNT; i++) {
+        sortedValues[i] = copy[i];
+      }
+    }
+
+    function syncSidebarAndHUD() {
+      const spec = STAGE_SPECS[currentStage];
+      const phaseObj = spec.phases[currentPhase];
+
+      document.getElementById('hud-stage-name').textContent = spec.hudName;
+      document.getElementById('hud-phase-title').textContent = phaseObj.title;
+      document.getElementById('hud-cand-time').textContent = spec.candTime;
+      document.getElementById('hud-std-time').textContent = spec.stdTime;
+      document.getElementById('hud-speedup').textContent = spec.speedup;
+
+      document.getElementById('side-badge').textContent = spec.badge;
+      document.getElementById('side-title').textContent = spec.title;
+      document.getElementById('side-desc').textContent = spec.desc;
+
+      document.getElementById('metric-complexity').textContent = spec.complexity;
+      document.getElementById('metric-cache').textContent = spec.cache;
+      document.getElementById('metric-passes').textContent = spec.passes;
+
+      spec.phases.forEach((p, idx) => {
+        document.getElementById(`card-${idx}-title`).textContent = p.cardTitle;
+        document.getElementById(`card-${idx}-body`).textContent = p.cardBody;
+        const cardEl = document.querySelector(`[data-phase-card="${idx}"]`);
+        if (idx === currentPhase) {
+          cardEl.className = 'p-3 rounded-xl border border-sky-500/80 bg-slate-950 shadow-sm transition-colors';
+          document.getElementById(`card-${idx}-title`).className = 'text-xs font-bold text-sky-300';
+          document.getElementById(`card-${idx}-body`).className = 'text-xs text-slate-200 mt-0.5';
+        } else {
+          cardEl.className = 'p-3 rounded-xl border border-slate-800 bg-slate-950/40 transition-colors';
+          document.getElementById(`card-${idx}-title`).className = 'text-xs font-bold text-slate-400';
+          document.getElementById(`card-${idx}-body`).className = 'text-xs text-slate-500 mt-0.5';
+        }
+      });
+
+      document.getElementById('toolbar-live-status').textContent =
+        `${spec.hudName} | ${phaseObj.title} (Speedup: ${spec.speedup})`;
+    }
+
+    function setStage(stageKey) {
+      currentStage = stageKey;
+      currentPhase = 0;
+      phaseProgress = 0;
+      populateStageData(stageKey);
+      document.querySelectorAll('[data-stage]').forEach((btn) => {
+        btn.setAttribute('aria-pressed', String(btn.dataset.stage === stageKey));
+      });
+      syncSidebarAndHUD();
+    }
+
+    // 7. Frame-by-Frame 3D Geometry Update
+    function updateSceneGeometry(dt) {
+      camera.position.lerp(cameraTargetPos, 0.08);
+      controls.update();
+
+      if (isPlaying) {
+        phaseProgress += dt * 0.38 * speedMultiplier;
+        if (phaseProgress >= 1.0) {
+          phaseProgress = 0;
+          currentPhase = (currentPhase + 1) % 3;
+          syncSidebarAndHUD();
+        }
+      }
+
+      const smoothT = phaseProgress * phaseProgress * (3 - 2 * phaseProgress);
+      const spanX = 36;
+      const startX = -spanX / 2;
+      const stepX = spanX / (ELEMENT_COUNT - 1);
+
+      let activeProbeIndex = -1;
+      let targetCellPosition = new THREE.Vector3(0, 0, 0);
+
+      // Update the 96 Element Bars
+      for (let i = 0; i < ELEMENT_COUNT; i++) {
+        let x = startX + i * stepX;
+        let z = 8.5;
+        let height = initialValues[i];
+        tempColor.copy(COLOR_DEFAULT);
+
+        if (currentStage === 'bitonic') {
+          const strideStep = Math.floor(ELEMENT_COUNT / 8);
+          const isStrideBeacon = i % strideStep === 0;
+          if (currentPhase === 0) {
+            z = 3.0;
+            if (isStrideBeacon) {
+              tempColor.copy(COLOR_PROBE);
+              height += Math.sin(phaseProgress * Math.PI * 4) * 0.45;
+            }
+          } else if (currentPhase === 1) {
+            z = 3.0;
+            const peakIdx = Math.floor(ELEMENT_COUNT * 0.56);
+            if (Math.abs(i - peakIdx) <= 2) {
+              tempColor.copy(COLOR_PROBE);
+              height += 0.8;
+            } else if (i < peakIdx) {
+              tempColor.copy(COLOR_DEFAULT);
+            } else {
+              tempColor.copy(COLOR_LATTICE);
+            }
+          } else {
+            // Phase 2: Two-pointer opposite merge into sorted array at z = -3.0
+            const mergeCutoff = Math.floor(smoothT * ELEMENT_COUNT);
+            if (i < mergeCutoff) {
+              height = sortedValues[i];
+              z = -3.0;
+              tempColor.copy(COLOR_SORTED);
+            } else {
+              z = 5.5;
+              const leftPtr = Math.floor(smoothT * 54);
+              const rightPtr = ELEMENT_COUNT - 1 - Math.floor(smoothT * 42);
+              if (i === leftPtr || i === rightPtr) {
+                tempColor.copy(COLOR_PROBE);
+                activeProbeIndex = i;
+              }
+            }
+          }
+        } else if (currentStage === 'sentinel') {
+          if (currentPhase === 0) {
+            // 5 quartile bursts + golden stride probe
+            const inQuartileBurst = (i % 20) < 4;
+            if (inQuartileBurst) {
+              tempColor.copy(COLOR_PROBE);
+              z = 6.5;
+            }
+          } else if (currentPhase === 1) {
+            const scannedCount = Math.floor(smoothT * ELEMENT_COUNT);
+            if (i === scannedCount) {
+              tempColor.copy(COLOR_PROBE);
+              activeProbeIndex = i;
+            } else if (i < scannedCount) {
+              tempColor.copy(COLOR_LATTICE);
+              height *= 0.35;
+            }
+          } else {
+            // Phase 2: Collapse from L1 crystal towers into sorted slice
+            height = initialValues[i] * (1 - smoothT) + sortedValues[i] * smoothT;
+            z = 8.5 * (1 - smoothT) + 4.0 * smoothT;
+            if (smoothT > 0.85 || i / ELEMENT_COUNT < smoothT) {
+              tempColor.copy(COLOR_SORTED);
+            }
+          }
+        } else if (currentStage === 'dense') {
+          if (currentPhase === 0) {
+            if (i === 0 || i === ELEMENT_COUNT - 1) {
+              tempColor.copy(COLOR_PROBE);
+            }
+          } else if (currentPhase === 1) {
+            const scannedCount = Math.floor(smoothT * ELEMENT_COUNT);
+            if (i <= scannedCount) {
+              tempColor.copy(COLOR_LATTICE);
+            }
+            if (i === scannedCount) {
+              tempColor.copy(COLOR_PROBE);
+              activeProbeIndex = i;
+            }
+          } else {
+            height = initialValues[i] * (1 - smoothT) + sortedValues[i] * smoothT;
+            tempColor.copy(i / ELEMENT_COUNT <= smoothT ? COLOR_SORTED : COLOR_DEFAULT);
+          }
+        } else {
+          // Stage 4: Fused 4-Pass Radix + Byte Skip
+          if (currentPhase === 0) {
+            const chunkScanner = Math.floor(smoothT * (ELEMENT_COUNT / 4)) * 4;
+            if (i >= chunkScanner && i < chunkScanner + 4) {
+              tempColor.copy(COLOR_PROBE);
+              activeProbeIndex = i;
+            }
+          } else if (currentPhase === 1) {
+            // Show partially ordered by lower bytes while Byte 2 is skipped
+            const intermediate = initialValues[i] * 0.45 + sortedValues[i] * 0.55;
+            height = intermediate;
+            tempColor.copy(COLOR_LATTICE);
+          } else {
+            height = initialValues[i] * (1 - smoothT) + sortedValues[i] * smoothT;
+            tempColor.copy(i / ELEMENT_COUNT <= smoothT ? COLOR_SORTED : COLOR_DEFAULT);
+          }
+        }
+
+        dummyPos.set(x, 0, z);
+        dummyScale.set(1, Math.max(0.15, height), 1);
+        dummyMatrix.compose(dummyPos, dummyQuat, dummyScale);
+        elementMesh.setMatrixAt(i, dummyMatrix);
+        elementMesh.setColorAt(i, tempColor);
+      }
+
+      // Update the 64 Lattice / Cache / Radix Histogram Towers in the Background
+      for (let c = 0; c < LATTICE_CELLS; c++) {
+        const row = Math.floor(c / 8);
+        const col = c % 8;
+        let cellX = (col - 3.5) * 2.4;
+        let cellZ = (row - 3.5) * 1.9 - 3.2;
+        let cellHeight = 0.08;
+        tempColor.copy(COLOR_LATTICE);
+
+        if (currentStage === 'bitonic') {
+          // 8-point inflection beacons along the back row
+          if (row === 3) {
+            cellX = -15 + col * (30 / 7);
+            cellZ = -2.5;
+            cellHeight = currentPhase === 0 ? 3.5 + Math.sin(phaseProgress * Math.PI * 2 + col) * 0.8 : 0.6;
+            tempColor.copy(currentPhase === 0 ? COLOR_PROBE : COLOR_SORTED);
+          } else {
+            cellHeight = 0.001;
+          }
+        } else if (currentStage === 'sentinel') {
+          const targetCount = latticeCounts[c];
+          if (c === 0) {
+            // Dual-sentinel home slot s0 = hash(0)
+            cellHeight = 1.6;
+            tempColor.copy(COLOR_PROBE);
+          } else if (targetCount > 0) {
+            if (currentPhase === 0) {
+              cellHeight = 0.4;
+            } else if (currentPhase === 1) {
+              cellHeight = 0.4 + targetCount * 1.15 * smoothT;
+              tempColor.copy(COLOR_LATTICE);
+            } else {
+              cellHeight = (0.4 + targetCount * 1.15) * (1 - smoothT * 0.75);
+              tempColor.copy(COLOR_SORTED);
+            }
+          } else {
+            cellHeight = 0.12;
+            tempColor.setHex(0x1e293b);
+          }
+        } else if (currentStage === 'dense') {
+          if (c < 32) {
+            cellX = (c - 15.5) * 1.1;
+            cellZ = -2.5;
+            const count = latticeCounts[c];
+            if (currentPhase === 0) {
+              cellHeight = 0.25;
+              tempColor.copy(COLOR_PROBE);
+            } else if (currentPhase === 1) {
+              cellHeight = 0.2 + count * 1.2 * smoothT;
+              tempColor.copy(COLOR_LATTICE);
+            } else {
+              cellHeight = (0.2 + count * 1.2) * (1 - smoothT * 0.7);
+              tempColor.copy(COLOR_SORTED);
+            }
+          } else {
+            cellHeight = 0.001;
+          }
+        } else {
+          // Stage 4: 4 concentric Radix Byte Lanes (4 rows x 16 buckets)
+          const byteLane = Math.floor(c / 16); // 0, 1, 2 (skipped!), 3
+          const bucketIdx = c % 16;
+          cellX = (bucketIdx - 7.5) * 2.1;
+          cellZ = -7.5 + byteLane * 3.2;
+
+          if (byteLane === 2) {
+            // Degenerate constant byte shell -> skipped!
+            cellHeight = bucketIdx === 0 ? 4.2 : 0.12;
+            tempColor.copy(currentPhase === 1 ? COLOR_PROBE : COLOR_SKIPPED);
+          } else {
+            const wave = Math.sin(bucketIdx * 0.6 + byteLane * 1.4) * 0.5 + 0.5;
+            if (currentPhase === 0) {
+              cellHeight = (0.4 + wave * 3.4) * smoothT;
+              tempColor.copy(COLOR_LATTICE);
+            } else if (currentPhase === 1) {
+              cellHeight = 0.4 + wave * 3.4;
+              tempColor.copy(COLOR_LATTICE);
+            } else {
+              cellHeight = 0.4 + wave * 3.4;
+              tempColor.copy(COLOR_SORTED);
+            }
+          }
+        }
+
+        if (activeProbeIndex >= 0 && bucketAssignments[activeProbeIndex] === c) {
+          targetCellPosition.set(cellX, cellHeight, cellZ);
+        }
+
+        dummyPos.set(cellX, 0, cellZ);
+        dummyScale.set(1, Math.max(0.001, cellHeight), 1);
+        dummyMatrix.compose(dummyPos, dummyQuat, dummyScale);
+        latticeMesh.setMatrixAt(c, dummyMatrix);
+        latticeMesh.setColorAt(c, tempColor);
+      }
+
+      // Update 3D parabolic laser arc from active element to its target lattice slot
+      if (activeProbeIndex >= 0) {
+        const srcX = startX + activeProbeIndex * stepX;
+        const srcY = initialValues[activeProbeIndex];
+        const srcZ = 8.5;
+        for (let p = 0; p < MAX_ARC_POINTS; p++) {
+          const t = p / (MAX_ARC_POINTS - 1);
+          arcPositions[p * 3] = srcX * (1 - t) + targetCellPosition.x * t;
+          arcPositions[p * 3 + 1] =
+            srcY * (1 - t) + targetCellPosition.y * t + Math.sin(t * Math.PI) * 5.0;
+          arcPositions[p * 3 + 2] = srcZ * (1 - t) + targetCellPosition.z * t;
+        }
+        arcLine.visible = true;
+        arcGeometry.attributes.position.needsUpdate = true;
+      } else {
+        arcLine.visible = false;
+      }
+
+      elementMesh.instanceMatrix.needsUpdate = true;
+      if (elementMesh.instanceColor) {
+        elementMesh.instanceColor.needsUpdate = true;
+      }
+      latticeMesh.instanceMatrix.needsUpdate = true;
+      if (latticeMesh.instanceColor) {
+        latticeMesh.instanceColor.needsUpdate = true;
+      }
+    }
+
+    // 8. Animation Loop + `efficient-background-processing` (`contentvisibilityautostatechange`)
+    let lastTimestamp = performance.now();
+
+    function renderLoop(now) {
+      const dt = Math.min((now - lastTimestamp) / 1000, 0.1);
+      lastTimestamp = now;
+      updateSceneGeometry(dt);
+      renderer.render(scene, camera);
+    }
+
+    function startSimulationLoop() {
+      lastTimestamp = performance.now();
+      renderer.setAnimationLoop(renderLoop);
+    }
+
+    function stopSimulationLoop() {
+      renderer.setAnimationLoop(null);
+    }
+
+    // Pause WebGL loop when off-screen using `contentvisibilityautostatechange` + IntersectionObserver fallback
+    container.addEventListener('contentvisibilityautostatechange', (event) => {
+      if (event.skipped) {
+        stopSimulationLoop();
+      } else {
+        startSimulationLoop();
+      }
+    });
+
+    if (!('contentVisibility' in document.documentElement.style)) {
+      const observer = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((entry) => {
+            if (entry.isIntersecting) {
+              startSimulationLoop();
+            } else {
+              stopSimulationLoop();
+            }
+          });
+        },
+        { rootMargin: '200px' }
+      );
+      observer.observe(container);
+    }
+
+    // 9. UI Controls Wiring
+    document.querySelectorAll('[data-stage]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        setStage(btn.dataset.stage);
+      });
+    });
+
+    const playPauseBtn = document.getElementById('btn-play-pause');
+    playPauseBtn.addEventListener('click', () => {
+      isPlaying = !isPlaying;
+      playPauseBtn.setAttribute('aria-pressed', String(isPlaying));
+      playPauseBtn.textContent = isPlaying ? 'Simulação Ativa' : 'Simulação Pausada';
+      document.getElementById('toolbar-live-status').textContent = isPlaying
+        ? 'Simulação retomada.'
+        : 'Simulação pausada pelo usuário.';
+    });
+
+    document.getElementById('btn-step').addEventListener('click', () => {
+      phaseProgress = 0;
+      currentPhase = (currentPhase + 1) % 3;
+      syncSidebarAndHUD();
+    });
+
+    document.getElementById('btn-reset').addEventListener('click', () => {
+      populateStageData(currentStage);
+      currentPhase = 0;
+      phaseProgress = 0;
+      syncSidebarAndHUD();
+    });
+
+    document.querySelectorAll('[data-cam]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('[data-cam]').forEach((other) => {
+          other.setAttribute('aria-pressed', String(other === btn));
+        });
+        const mode = btn.dataset.cam;
+        if (mode === 'iso') {
+          cameraTargetPos.set(0, 16, 34);
+        } else if (mode === 'top') {
+          cameraTargetPos.set(0, 38, 4);
+        } else {
+          cameraTargetPos.set(0, 7, 38);
+        }
+        document.getElementById('toolbar-live-status').textContent =
+          `Ângulo de câmera alterado para: ${btn.textContent.trim()}.`;
+      });
+    });
+
+    const speedInput = document.getElementById('speed-range');
+    const speedVal = document.getElementById('speed-val');
+    speedInput.addEventListener('input', () => {
+      speedMultiplier = parseFloat(speedInput.value);
+      speedVal.textContent = `${speedMultiplier.toFixed(1)}x`;
+    });
+
+    window.addEventListener('resize', () => {
+      camera.aspect = container.clientWidth / container.clientHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(container.clientWidth, container.clientHeight);
+    });
+
+    // Initialize stage 1 and start WebGL loop
+    setStage('bitonic');
+    startSimulationLoop();
+  </script>
+</body>
+</html>
